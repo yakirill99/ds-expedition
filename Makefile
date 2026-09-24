@@ -1,4 +1,4 @@
-.PHONY: setup lint test train predict submit
+.PHONY: data setup lint test train predict submit
 setup:
 	uv sync --all-groups && uv run pre-commit install
 lint:
@@ -11,3 +11,5 @@ predict:
 	uv run python scripts/predict.py --config configs/baseline.yaml
 submit:
 	uv run python scripts/make_submission.py --config configs/baseline.yaml
+data:
+	uv run python scripts/fetch_data.py
