@@ -1,0 +1,6 @@
+seed: 42
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+model:
+  name: baseline
