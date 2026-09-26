@@ -48,7 +48,6 @@ class DiceFocalLoss(nn.Module):
         self.focal = FocalLoss(alpha=alpha, gamma=gamma)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        return (
-            self.dice_weight * self.dice(logits, targets)
-            + self.focal_weight * self.focal(logits, targets)
+        return self.dice_weight * self.dice(logits, targets) + self.focal_weight * self.focal(
+            logits, targets
         )

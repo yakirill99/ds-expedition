@@ -1,6 +1,5 @@
 import segmentation_models_pytorch as smp
 import torch
-import torch.nn as nn
 
 from .base import BaseSegmenter
 
