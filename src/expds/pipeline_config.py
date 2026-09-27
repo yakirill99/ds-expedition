@@ -1,22 +1,31 @@
-"""Конфиг костяка: секции data / targets / tiles того же YAML, что читает load_config роли 1.
+"""Конфиг костяка: секции data / targets / tiles / model / loss / stitch того же YAML,
+что читает load_config роли 1.
 
 load_config роли 1 лишние секции игнорирует, поэтому один файл на датасет.
+data / targets / tiles обязательны; model / loss / stitch необязательны (дефолты dataclass),
+неизвестные ключи внутри них — ошибка.
 Секции post / eval / train добавятся вместе со своими модулями.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from expds.fusion.stitch import StitchConfig
+from expds.models.factory import ModelConfig, input_divisor
+from expds.models.koz_loss import LossConfig
 from expds.tiles.dataset import SUPPORTED_NORMALIZE
 
 _KEY_DATA = "data"
 _KEY_TARGETS = "targets"
 _KEY_TILES = "tiles"
+_KEY_MODEL = "model"
+_KEY_LOSS = "loss"
+_KEY_STITCH = "stitch"
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,9 @@ class PipelineConfig:
     data: DataConfig
     targets: TargetsConfig
     tiles: TilesConfig
+    model: ModelConfig = field(default_factory=ModelConfig)
+    loss: LossConfig = field(default_factory=LossConfig)
+    stitch: StitchConfig = field(default_factory=StitchConfig)
 
 
 def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -60,6 +72,16 @@ def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
     value = raw.get(key)
     if not isinstance(value, dict):
         raise KeyError(f"В конфиге нет секции '{key}' (или она не словарь)")
+    return value
+
+
+def _optional_section(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    """Секция-словарь или {} если её нет."""
+    value = raw.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise KeyError(f"Секция '{key}' не словарь")
     return value
 
 
@@ -109,4 +131,18 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
     if not 0.0 < tiles.pos_fraction < 1.0:
         raise ValueError(f"tiles.pos_fraction вне (0, 1): {tiles.pos_fraction}")
 
-    return PipelineConfig(data=data, targets=targets, tiles=tiles)
+    model = ModelConfig.from_dict(_optional_section(raw, _KEY_MODEL))
+    div = input_divisor(model)
+    if tiles.tile_px % div:
+        raise ValueError(
+            f"tiles.tile_px={tiles.tile_px} не делится на {div} (model.arch={model.arch})"
+        )
+
+    return PipelineConfig(
+        data=data,
+        targets=targets,
+        tiles=tiles,
+        model=model,
+        loss=LossConfig.from_dict(_optional_section(raw, _KEY_LOSS)),
+        stitch=StitchConfig.from_dict(_optional_section(raw, _KEY_STITCH)),
+    )
