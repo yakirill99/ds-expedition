@@ -9,7 +9,7 @@ class BaseSegmenter(nn.Module, ABC):
     Базовый интерфейс сегментатора.
 
     Вход:  (B, C, H, W)
-    Выход: (B, 1, H, W)  — логиты (или вероятности после sigmoid)
+    Выход: (B, K, H, W) — логиты (по одному каналу на класс)
     """
 
     def __init__(self):
@@ -17,11 +17,11 @@ class BaseSegmenter(nn.Module, ABC):
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Возвращает логиты формы (B, 1, H, W)."""
+        """Возвращает логиты формы (B, K, H, W)."""
         ...
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
-        """Инференс: возвращает вероятности (B, 1, H, W)."""
+        """Инференс: вероятности (B, K, H, W) после sigmoid по каналам."""
         self.eval()
         with torch.no_grad():
             logits = self.forward(x)

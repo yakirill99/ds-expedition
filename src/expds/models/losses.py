@@ -10,8 +10,8 @@ class DiceLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         probs = torch.sigmoid(logits)
-        probs = probs.view(-1)
-        targets = targets.view(-1)
+        probs = probs.reshape(-1)
+        targets = targets.reshape(-1)
 
         intersection = (probs * targets).sum()
         dice = (2.0 * intersection + self.smooth) / (probs.sum() + targets.sum() + self.smooth)

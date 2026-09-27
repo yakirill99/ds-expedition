@@ -5,11 +5,15 @@ from .base import BaseSegmenter
 
 
 class UNetSegmenter(BaseSegmenter):
+    """
+    U-Net baseline.
+    """
+
     def __init__(
         self,
         encoder_name: str = "resnet34",
-        encoder_weights: str | None = "imagenet",
-        in_channels: int = 10,
+        encoder_weights: str | None = None,
+        in_channels: int = 19,
         classes: int = 1,
         activation: str | None = None,
     ):
