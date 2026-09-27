@@ -12,6 +12,8 @@ dependencies = [
     "lazrs>=0.8.2",
     "rasterio>=1.4.4",
     "pyproj>=3.7.2",
+    "torch>=2.14.0",
+    "segmentation-models-pytorch>=0.5.0",
 ]
 
 [dependency-groups]
