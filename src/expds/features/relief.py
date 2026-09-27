@@ -78,7 +78,7 @@ def compute_aspect(
     """
     gy, gx = np.gradient(dtm, pixel_size)
     # atan2(-gx, gy) даёт угол от севера по часовой стрелке.
-    aspect_rad = np.arctan2(-gx, gy)
+    aspect_rad = np.arctan2(-gx, -gy)  # Grid: row растёт на север
     aspect_deg = (aspect_rad / _DEG_TO_RAD) % 360.0
     return aspect_deg.astype(np.float32)
 
@@ -113,7 +113,7 @@ def compute_hillshade(
 
     # Нормаль к поверхности.
     slope_rad = np.arctan(np.sqrt(gx * gx + gy * gy))
-    aspect_rad = np.arctan2(-gx, gy)
+    aspect_rad = np.arctan2(-gx, -gy)  # Grid: row растёт на север
 
     # Освещённость = cos(zenith) * cos(slope)
     #              + sin(zenith) * sin(slope) * cos(azimuth - aspect)
@@ -169,7 +169,7 @@ def compute_slope_aspect(
     slope_rad = np.arctan(np.sqrt(gx * gx + gy * gy))
     slope_deg = (slope_rad / _DEG_TO_RAD).astype(np.float32)
 
-    aspect_rad = np.arctan2(-gx, gy)
+    aspect_rad = np.arctan2(-gx, -gy)  # Grid: row растёт на север
     aspect_deg = ((aspect_rad / _DEG_TO_RAD) % 360.0).astype(np.float32)
 
     return slope_deg, aspect_deg

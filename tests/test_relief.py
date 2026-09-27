@@ -87,7 +87,8 @@ class TestAspect:
         assert aspect[1:-1, 1:-1].mean() == pytest.approx(270.0, abs=1.0)
 
     def test_north_facing(self) -> None:
-        dtm = _plane(slope_y=0.1)
+        # Grid: row растёт на север. Высота падает к северу => склон смотрит на север (0°).
+        dtm = _plane(slope_y=-0.1)
         aspect = compute_aspect(dtm=dtm, pixel_size=1.0)
         mean_aspect = aspect[1:-1, 1:-1].mean()
         assert min(abs(mean_aspect), abs(mean_aspect - 360.0)) < 1.0
