@@ -190,7 +190,7 @@ def resample_layer(
 
     destination = np.full(target_grid.shape, layer.nodata, dtype=np.float32)
     reproject(
-        source=layer.data,
+        source=np.ascontiguousarray(np.flipud(layer.data)),  # Grid (row 0 = юг) -> north-up
         destination=destination,
         src_transform=src_transform,
         src_crs=src_crs,
@@ -200,6 +200,8 @@ def resample_layer(
         dst_nodata=layer.nodata,
         resampling=_METHOD_MAP[method],
     )
+
+    destination = np.ascontiguousarray(np.flipud(destination))  # north-up -> Grid
 
     return Layer(
         name=layer.name,

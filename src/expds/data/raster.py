@@ -245,6 +245,8 @@ def read_raster(
     with rasterio.open(path) as src:
         src_crs_str = src.crs.to_string() if src.crs is not None else None
         src_transform = src.transform
+        if src_transform.e > 0:
+            raise ValueError(f"Растр {path.name}: south-up transform (e > 0) не поддерживается")
         src_crs = src.crs
         src_nodata = src.nodata
         data = src.read(1).astype(np.float32)
@@ -311,6 +313,9 @@ def read_raster(
             result = data.copy()
             result[data == src_nodata] = nodata
 
+    # GeoTIFF north-up (строка 0 = север) -> конвенция Grid (row 0 = юг).
+    result = np.ascontiguousarray(np.flipud(result))
+
     layer = Layer(
         name=path.stem,
         data=result.astype(np.float32, copy=False),
@@ -359,7 +364,8 @@ def write_raster(
     }
 
     with rasterio.open(path, "w", **profile) as dst:
-        dst.write(layer.data.astype(dtype, copy=False), 1)
+        # Grid: row 0 = юг; GeoTIFF north-up: строка 0 = север.
+        dst.write(np.ascontiguousarray(np.flipud(layer.data)).astype(dtype, copy=False), 1)
 
     logger.info(
         "Записан растр: %s | %dx%d | %s | compress=%s",
