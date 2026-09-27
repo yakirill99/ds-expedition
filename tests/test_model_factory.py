@@ -3,6 +3,7 @@ import torch
 
 from expds.models import (
     KozLoss,
+    LossConfig,
     ModelConfig,
     build_model,
     input_divisor,
@@ -125,3 +126,12 @@ def test_checkpoint_roundtrip(tmp_path):
     assert meta["extra"]["epoch"] == 3
     with pytest.raises(ValueError, match="channel_names"):
         load_checkpoint(p, channel_names=names[::-1])
+
+
+def test_hm_loss_floor_without_points():
+    """Батч без точек: hm нормируется на hm_min_norm, а не на 1."""
+    logits = torch.zeros(2, 2 * K, 64, 64)
+    z = torch.zeros(2, K, 64, 64)
+    hm = KozLoss(K, LossConfig(hm_min_norm=50.0))(logits, z, z)["hm"].item()
+    per_px = 0.25 * float(torch.log(torch.tensor(2.0)))  # |0.5 - 0|^2 * BCE(0.5, 0)
+    assert hm == pytest.approx(2 * K * 64 * 64 * per_px / 50.0, rel=1e-4)

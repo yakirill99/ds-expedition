@@ -240,6 +240,7 @@ loss:
   focal_alpha: 0.25
   focal_gamma: 2.0
   hm_beta: 2.0
+  hm_min_norm: 50.0
   smooth: 1.0
 
 stitch:
@@ -255,6 +256,7 @@ post:
   point_radius_px: 4.0
   point_vertices: 16
   nms_radius_px: 6.0
+  max_detections: 2000
 
 eval:
   iou_thr: 0.5
@@ -262,3 +264,17 @@ eval:
   r_tol_units: crs   # crs | meters — уточнить по регламенту
   iou_samples: 128
   class_agnostic: false
+
+train:
+  epochs: 10
+  batch_size: 8
+  lr: 0.001
+  weight_decay: 0.0001
+  amp: true
+  device: auto
+  num_workers: 2
+  seed: 0
+  tiles_per_epoch: 512
+  train_sites: [site_1, site_2]
+  val_sites: [site_3]
+  runs_dir: runs
