@@ -1,4 +1,5 @@
 """make_submission: точка входа. Заглушка — заменить на реальный пайплайн."""
+
 import argparse
 
 import yaml
