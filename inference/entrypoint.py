@@ -27,7 +27,15 @@ def _ensure_expds() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _ensure_expds()
+    import expds
     from expds.predict import main as predict_main
+
+    src = (
+        Path(expds.__file__).parent
+        if getattr(expds, "__file__", None)
+        else Path(next(iter(expds.__path__)))  # namespace-пакет (репозиторий)
+    )
+    print(f"expds: {src.resolve()}", flush=True)  # smoke сверяет источник
 
     return predict_main(
         argv,
