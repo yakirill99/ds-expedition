@@ -1,18 +1,12 @@
-"""make_submission: точка входа. Заглушка — заменить на реальный пайплайн."""
+"""Архив сабмита + smoke из распакованного архива без сети.
 
-import argparse
+uv run python scripts/make_submission.py --config configs/dataset_synthetic.yaml \
+    --weights runs/<run>/best.pt --out dist/submission.zip --smoke-data data/synthetic/site_3
+"""
 
-import yaml
+import sys
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-    print("make_submission:", cfg)
-
+from expds.submission import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
