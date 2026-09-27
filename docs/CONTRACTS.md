@@ -117,3 +117,7 @@ point_density, std_intensity, z_std
   строки 0 с `Grid.transform_to_world(0, 0)`.
 - Точный список 19 каналов: `sample_meta.json` после прогона `build_layers.py`.
 - Регламент: R_tolerance, IoU-порог, классы.
+
+## Костяк
+
+Пайплайн, API модулей, команды: [SKELETON.md](SKELETON.md).
