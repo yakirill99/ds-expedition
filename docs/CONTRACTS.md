@@ -21,13 +21,10 @@
 - `read_raster(path, grid)` — чтение с ресэмплингом в grid при несовпадении.
 - `write_raster(...)` — пишет `layer.data` с transform из `_build_transform`.
 
-**⚠ ОТКРЫТЫЙ ВОПРОС — ориентация Y.** Если растры строятся через
-`Grid.transform_to_pixel` (row 0 = y_min) и пишутся без флипа под north-up
-transform, то лидарные слои в tif перевёрнуты по Y относительно мира, а внешние
-tif (снимки, магнитка, георадар, hillshade организаторов), прочитанные через
-`read_raster`, будут в north-up ориентации. Round-trip write→read при этом
-консистентен, тесты зелёные, баг скрыт. Статус: проверяется probe-скриптом
-(см. §7). До закрытия вопроса синтетика и векторизация не пишутся.
+**⚠ Баг ориентации Y подтверждён и исправлен** (PR `fix/raster-y-orientation`):
+`flipud` на границе в `write_raster`/`read_raster` и вокруг `reproject` в `align.py`;
+`relief.py`: `arctan2(-gx, -gy)`. В памяти всегда конвенция Grid (row 0 = юг),
+на диске — north-up. South-up tif → ValueError. Кэш до фикса пересобрать.
 
 ## 2. Layer, DataSpec, Sample, stack_layers
 
@@ -116,7 +113,7 @@ point_density, std_intensity, z_std
 
 ## 7. Проверки, закрывающие открытые вопросы
 
-- Ориентация Y: probe-скрипт write_raster → rasterio → сравнение мировой Y
+- Ориентация Y: закрыто, регрессионные тесты `tests/test_*_orientation.py`.
   строки 0 с `Grid.transform_to_world(0, 0)`.
 - Точный список 19 каналов: `sample_meta.json` после прогона `build_layers.py`.
 - Регламент: R_tolerance, IoU-порог, классы.
