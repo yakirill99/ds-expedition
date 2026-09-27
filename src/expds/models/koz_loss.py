@@ -20,6 +20,7 @@ class LossConfig:
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
     hm_beta: float = 2.0
+    hm_min_norm: float = 50.0
     smooth: float = 1.0
 
     @classmethod
@@ -34,7 +35,9 @@ class LossConfig:
 class KozLoss(nn.Module):
     """
     Лосс для выхода [seg_0..K-1, hm_0..K-1].
-    seg: Dice по классам + focal с alpha-балансом; hm: soft focal (QFL) по гауссовой heatmap.
+    seg: Dice по классам + focal с alpha-балансом; hm: soft focal (QFL) по гауссовой heatmap,
+    нормировка на max(масса heatmap, hm_min_norm): без пола батч без точек даёт сумму по всем
+    пикселям (лосс ~1e4, переполнение градиента в fp16). 50 ~ масса точки 2*pi*sigma^2 при sigma=3.
     valid (B, H, W) исключает nodata и паддинг. Считается в float32 (безопасно для AMP).
     """
 
@@ -74,7 +77,7 @@ class KozLoss(nn.Module):
         q = torch.sigmoid(hm)
         bce_h = F.binary_cross_entropy_with_logits(hm, y_hm, reduction="none")
         hm_loss = ((q - y_hm).abs().pow(c.hm_beta) * bce_h * m).sum() / (
-            (y_hm * m).sum().clamp_min(1.0)
+            (y_hm * m).sum().clamp_min(c.hm_min_norm)
         )
 
         total = (

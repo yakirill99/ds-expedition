@@ -1,10 +1,10 @@
-"""Конфиг костяка: секции data / targets / tiles / model / loss / stitch / post / eval того же YAML,
-что читает load_config роли 1.
+"""Конфиг костяка: секции data / targets / tiles / model / loss / stitch / post / eval / train
+того же YAML, что читает load_config роли 1.
 
 load_config роли 1 лишние секции игнорирует, поэтому один файл на датасет.
-data / targets / tiles обязательны; model / loss / stitch / post / eval необязательны
-(дефолты dataclass), неизвестные ключи внутри них — ошибка.
-Секция train добавится вместе со своими модулями.
+data / targets / tiles обязательны; model / loss / stitch / post / eval / train
+необязательны (дефолты dataclass), неизвестные ключи внутри них — ошибка.
+data.labels_crs — CRS разметки и метрики (по умолчанию EPSG:3857).
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from expds.models.factory import ModelConfig, input_divisor
 from expds.models.koz_loss import LossConfig
 from expds.post.vectorize import PostConfig
 from expds.tiles.dataset import SUPPORTED_NORMALIZE
+from expds.train import TrainConfig
 
 _KEY_DATA = "data"
 _KEY_TARGETS = "targets"
@@ -30,6 +31,8 @@ _KEY_LOSS = "loss"
 _KEY_STITCH = "stitch"
 _KEY_POST = "post"
 _KEY_EVAL = "eval"
+_KEY_TRAIN = "train"
+_DEFAULT_LABELS_CRS = "EPSG:3857"
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ class DataConfig:
     labels_file: str
     channels: tuple[str, ...]
     normalize: str
+    labels_crs: str = _DEFAULT_LABELS_CRS
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ class PipelineConfig:
     stitch: StitchConfig = field(default_factory=StitchConfig)
     post: PostConfig = field(default_factory=PostConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
 
 
 def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -119,6 +124,7 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
         labels_file=str(data_raw["labels_file"]),
         channels=_unique(tuple(str(c) for c in data_raw["channels"]), "data.channels"),
         normalize=str(data_raw["normalize"]),
+        labels_crs=str(data_raw.get("labels_crs", _DEFAULT_LABELS_CRS)),
     )
     if data.normalize not in SUPPORTED_NORMALIZE:
         raise ValueError(f"data.normalize '{data.normalize}' не из {SUPPORTED_NORMALIZE}")
@@ -153,4 +159,5 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
         stitch=StitchConfig.from_dict(_optional_section(raw, _KEY_STITCH)),
         post=PostConfig.from_dict(_optional_section(raw, _KEY_POST)),
         eval=EvalConfig.from_dict(_optional_section(raw, _KEY_EVAL)),
+        train=TrainConfig.from_dict(_optional_section(raw, _KEY_TRAIN)),
     )

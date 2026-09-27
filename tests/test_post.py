@@ -140,3 +140,13 @@ def test_geojson_roundtrip(tmp_path):
     feats = read_labels(p, grid, "EPSG:3857")
     assert len(feats) == 1 and feats[0].cls == "mound"
     assert np.hypot(*(np.asarray(feats[0].centroid_world) - _world(60, 70))) < 0.5 * PS
+
+
+def test_postprocess_max_detections():
+    probs = np.zeros((2, H, W), np.float32)
+    rr, cc = np.mgrid[:H, :W]
+    probs[1] = ((rr % 16 == 8) & (cc % 16 == 8)) * np.linspace(0.4, 0.9, W)[None, :]
+    all_dets = postprocess(probs, _grid(), ("mound",), PostConfig())
+    top = postprocess(probs, _grid(), ("mound",), PostConfig(max_detections=5))
+    assert len(all_dets) == 80 and len(top) == 5
+    assert [d.score for d in top] == [d.score for d in all_dets[:5]]

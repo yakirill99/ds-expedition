@@ -37,6 +37,7 @@ class PostConfig:
     point_radius_px: float = 4.0
     point_vertices: int = 16
     nms_radius_px: float = 6.0
+    max_detections: int = 2000
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> PostConfig:
@@ -51,6 +52,8 @@ class PostConfig:
             raise ValueError("post.peak_window_px must be odd and >= 3")
         if cfg.point_vertices < 3:
             raise ValueError("post.point_vertices must be >= 3")
+        if cfg.max_detections < 1:
+            raise ValueError("post.max_detections must be >= 1")
         return cfg
 
 
@@ -187,7 +190,7 @@ def postprocess(
     cfg: PostConfig | None = None,
     valid: np.ndarray | None = None,
 ) -> list[Detection]:
-    """(2K, H, W) вероятности [seg_0..K-1, hm_0..K-1] -> детекции после NMS."""
+    """(2K, H, W) вероятности [seg_0..K-1, hm_0..K-1] -> детекции после NMS (топ max_detections)."""
     cfg = cfg or PostConfig()
     k = len(classes)
     if probs.ndim != 3 or probs.shape[0] != 2 * k:
@@ -200,4 +203,4 @@ def postprocess(
     for i, cls in enumerate(classes):
         dets += seg_to_polygons(probs[i], grid, cls, cfg)
         dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
-    return nms_centroids(dets, cfg.nms_radius_px * grid.pixel_size)
+    return nms_centroids(dets, cfg.nms_radius_px * grid.pixel_size)[: cfg.max_detections]
