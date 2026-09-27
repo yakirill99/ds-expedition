@@ -2,7 +2,17 @@
 name = "expds"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["numpy", "pandas", "scikit-learn", "pyyaml"]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "pyyaml",
+    "scipy>=1.17.1",
+    "laspy>=2.7.0",
+    "lazrs>=0.8.2",
+    "rasterio>=1.4.4",
+    "pyproj>=3.7.2",
+]
 
 [dependency-groups]
 dev = ["pytest", "ruff", "pre-commit", "nbstripout"]
