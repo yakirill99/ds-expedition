@@ -1,10 +1,10 @@
-"""Конфиг костяка: секции data / targets / tiles / model / loss / stitch / post того же YAML,
+"""Конфиг костяка: секции data / targets / tiles / model / loss / stitch / post / eval того же YAML,
 что читает load_config роли 1.
 
 load_config роли 1 лишние секции игнорирует, поэтому один файл на датасет.
-data / targets / tiles обязательны; model / loss / stitch / post необязательны (дефолты dataclass),
-неизвестные ключи внутри них — ошибка.
-Секции eval / train добавятся вместе со своими модулями.
+data / targets / tiles обязательны; model / loss / stitch / post / eval необязательны
+(дефолты dataclass), неизвестные ключи внутри них — ошибка.
+Секция train добавится вместе со своими модулями.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from expds.eval.metric import EvalConfig
 from expds.fusion.stitch import StitchConfig
 from expds.models.factory import ModelConfig, input_divisor
 from expds.models.koz_loss import LossConfig
@@ -28,6 +29,7 @@ _KEY_MODEL = "model"
 _KEY_LOSS = "loss"
 _KEY_STITCH = "stitch"
 _KEY_POST = "post"
+_KEY_EVAL = "eval"
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ class PipelineConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     stitch: StitchConfig = field(default_factory=StitchConfig)
     post: PostConfig = field(default_factory=PostConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
 
 
 def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -149,4 +152,5 @@ def load_pipeline_config(path: Path) -> PipelineConfig:
         loss=LossConfig.from_dict(_optional_section(raw, _KEY_LOSS)),
         stitch=StitchConfig.from_dict(_optional_section(raw, _KEY_STITCH)),
         post=PostConfig.from_dict(_optional_section(raw, _KEY_POST)),
+        eval=EvalConfig.from_dict(_optional_section(raw, _KEY_EVAL)),
     )
