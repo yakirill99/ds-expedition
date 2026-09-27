@@ -339,6 +339,7 @@ def train_from_config(
     (run_dir / "run.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
-    print(f"run_dir: {run_dir} | device: {meta['device']} {meta['cuda_device'] or ''}", flush=True)
+    gpu = f" {meta['cuda_device']}" if meta["device"].startswith("cuda") else ""
+    print(f"run_dir: {run_dir} | device: {meta['device']}{gpu}", flush=True)
     fit(cfg, train_sites, val_sets, run_dir)
     return run_dir
