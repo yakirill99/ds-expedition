@@ -226,3 +226,18 @@ tiles:
   overlap_px: 32
   # Доля тайлов с объектами при обучении (WeightedRandomSampler).
   pos_fraction: 0.7
+
+model:
+  arch: unet          # unet | stub (stub: CI/e2e)
+  encoder: resnet34   # encoder_weights всегда None (офлайн)
+  stub_kernel: 3
+  prior_prob: 0.01
+loss:
+  seg_weight: 1.0
+  hm_weight: 1.0
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  hm_beta: 2.0
+  smooth: 1.0
