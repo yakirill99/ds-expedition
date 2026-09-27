@@ -241,3 +241,7 @@ loss:
   focal_gamma: 2.0
   hm_beta: 2.0
   smooth: 1.0
+
+stitch:
+  window: hann   # hann | flat
+  eps: 0.001
