@@ -30,8 +30,8 @@ def _dist(r, c, h=H, w=W):
 
 
 def _area(ring):
-    x, y = ring[:, 0], ring[:, 1]
-    return 0.5 * float(np.dot(x[:-1], y[1:]) - np.dot(x[1:], y[:-1]))
+    x, y = ring[:, 0] - ring[0, 0], ring[:, 1] - ring[0, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
 
 
 def test_config_rejects_bad():
@@ -51,7 +51,7 @@ def test_disk_polygon(smooth, simplify, tol):
     )
     assert len(dets) == 1
     ring = dets[0].geometry
-    assert np.allclose(ring[0], ring[-1])
+    assert not np.array_equal(ring[0], ring[-1])  # контракт: без замыкающей точки
     area = _area(ring)
     assert area > 0  # CCW
     assert abs(area / (np.pi * (rad * PS) ** 2) - 1) < tol
@@ -91,13 +91,12 @@ def test_heatmap_subpixel_peak():
     assert len(dets) == 1
     assert np.hypot(*(np.asarray(dets[0].centroid) - _world(r0, c0))) < 0.05 * PS
     assert dets[0].score > 0.9
+    assert len(dets[0].geometry) == PostConfig().point_vertices
     assert heatmap_to_points(hm * 0.2, _grid(), "mound", PostConfig(hm_thr=0.3)) == []
 
 
 def _det(cls, score, x, y):
-    ring = np.array(
-        [[x - 1, y - 1], [x + 1, y - 1], [x + 1, y + 1], [x - 1, y + 1], [x - 1, y - 1]]
-    )
+    ring = np.array([[x - 1, y - 1], [x + 1, y - 1], [x + 1, y + 1], [x - 1, y + 1]])
     return Detection(cls=cls, score=score, geom_type="Polygon", geometry=ring)
 
 

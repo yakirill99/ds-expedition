@@ -255,3 +255,10 @@ post:
   point_radius_px: 4.0
   point_vertices: 16
   nms_radius_px: 6.0
+
+eval:
+  iou_thr: 0.5
+  r_tol: 5.0
+  r_tol_units: crs   # crs | meters — уточнить по регламенту
+  iou_samples: 128
+  class_agnostic: false

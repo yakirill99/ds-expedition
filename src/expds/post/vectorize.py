@@ -2,6 +2,7 @@
 
 seg-голова: порог -> 8-связные компоненты -> контур по вероятности на уровне порога
 (субпиксельно, skimage.find_contours) -> Дуглас-Пекер -> мир. Дыры пока отбрасываются.
+Кольца Detection — без замыкающей точки (контракт io.geojson), CCW.
 hm-голова: локальные максимумы -> субпиксельное уточнение (парабола по log) -> круг.
 Координаты по контракту Grid: row 0 = юг, центр пикселя x = x_min + (col + 0.5) * ps.
 """
@@ -57,8 +58,9 @@ class PostConfig:
 
 
 def _signed_area(ring: np.ndarray) -> float:
-    x, y = ring[:, 0], ring[:, 1]
-    return 0.5 * float(np.dot(x[:-1], y[1:]) - np.dot(x[1:], y[:-1]))
+    """Ориентированная площадь; кольцо замкнутое или нет — без разницы."""
+    x, y = ring[:, 0] - ring[0, 0], ring[:, 1] - ring[0, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
 
 
 def _dp_keep(pts: np.ndarray, tol: float) -> np.ndarray:
@@ -89,7 +91,7 @@ def _dp_keep(pts: np.ndarray, tol: float) -> np.ndarray:
 def simplify_ring(ring: np.ndarray, tol: float) -> np.ndarray:
     """Дуглас-Пекер для замкнутого кольца [N, 2] (first == last). Возвращает замкнутое кольцо."""
     ring = np.asarray(ring, dtype=np.float64)
-    pts = ring[:-1] if np.allclose(ring[0], ring[-1]) else ring
+    pts = ring[:-1] if np.array_equal(ring[0], ring[-1]) else ring
     if tol <= 0 or len(pts) < 4:
         return np.vstack([pts, pts[:1]])
     far = int(np.argmax(np.hypot(*(pts - pts[0]).T)))
@@ -117,7 +119,7 @@ def _ccw(ring: np.ndarray) -> np.ndarray:
 
 
 def seg_to_polygons(prob: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> list[Detection]:
-    """(H, W) вероятность одного класса -> полигоны компонент (внешний контур, CCW, замкнут)."""
+    """(H, W) вероятность одного класса -> полигоны компонент (внешний контур, CCW)."""
     h, w = prob.shape
     lab, n = ndimage.label(prob >= cfg.seg_thr, structure=_EIGHT)
     dets: list[Detection] = []
@@ -140,7 +142,7 @@ def seg_to_polygons(prob: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> 
         rc = simplify_ring(rc, cfg.simplify_px)
         if len(rc) < 4:
             continue
-        ring = _ccw(_pix_to_world(rc, grid))
+        ring = _ccw(_pix_to_world(rc[:-1], grid))
         score = float(prob[sl][comp].mean())
         dets.append(Detection(cls=cls, score=score, geom_type="Polygon", geometry=ring))
     return dets
@@ -171,7 +173,6 @@ def heatmap_to_points(hm: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> 
         dc = _refine(hm[r, c - 1], hm[r, c], hm[r, c + 1]) if 0 < c < w - 1 else 0.0
         center = _pix_to_world(np.array([[r + dr, c + dc]]), grid)[0]
         ring = center + circle
-        ring = np.vstack([ring, ring[:1]])
         dets.append(Detection(cls=cls, score=float(hm[r, c]), geom_type="Polygon", geometry=ring))
     return dets
 

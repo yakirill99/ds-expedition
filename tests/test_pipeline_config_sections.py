@@ -24,11 +24,12 @@ def test_synthetic_sections():
     assert cfg.loss.hm_weight == 1.0
     assert cfg.stitch.window == "hann"
     assert cfg.post.seg_thr == 0.5
+    assert cfg.eval.r_tol_units in ("crs", "meters")
 
 
 def test_optional_sections_default(tmp_path):
     raw = _raw()
-    for k in ("model", "loss", "stitch", "post"):
+    for k in ("model", "loss", "stitch", "post", "eval"):
         raw.pop(k, None)
     cfg = load_pipeline_config(_dump(tmp_path, raw))
     assert cfg.model.arch == "unet" and cfg.stitch.window == "hann"
@@ -44,7 +45,7 @@ def test_tile_divisor(tmp_path):
     assert load_pipeline_config(_dump(tmp_path, raw)).tiles.tile_px == 250
 
 
-@pytest.mark.parametrize("key", ["model", "loss", "stitch", "post"])
+@pytest.mark.parametrize("key", ["model", "loss", "stitch", "post", "eval"])
 def test_unknown_key_rejected(tmp_path, key):
     raw = _raw()
     raw[key] = {**(raw.get(key) or {}), "typo_key": 1}
