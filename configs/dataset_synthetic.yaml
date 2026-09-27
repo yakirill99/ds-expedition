@@ -142,3 +142,87 @@ synthetic:
     noise_std_nt: 0.5
     # Доля участка (с юга) с магнитной съёмкой; остальное — nodata.
     coverage: 0.8
+
+# ============================================================
+# Костяк (читает expds.pipeline_config; load_config роли 1 игнорирует)
+# ============================================================
+data:
+  sites_dir: data/synthetic
+  labels_file: labels.geojson
+  # Порядок = контракт модели (сохраняется в чекпойнт). aspect не берём: угол разрывен.
+  # point_density / mean_intensity в синтетике отсутствуют -> channel_mask = False.
+  channels:
+    - dtm
+    - slope
+    - hillshade_az_45
+    - hillshade_az_135
+    - hillshade_az_225
+    - hillshade_az_315
+    - slrm_sigma_8.0
+    - positive_openness
+    - negative_openness
+    - sky_view_factor
+    - curvature_sigma_2.0
+    - tpi_radius_5
+    - tri_radius_3
+    - point_density
+    - mean_intensity
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
+  # none | site_robust: (x - median) / (p98 - p2) по валидным пикселям участка.
+  normalize: site_robust
+
+targets:
+  classes: [mound, rampart, ditch]
+  # Сигма гаусса для точечных объектов, пиксели.
+  heatmap_sigma_px: 3.0
+
+tiles:
+  tile_px: 256
+  overlap_px: 32
+  # Доля тайлов с объектами при обучении (WeightedRandomSampler).
+  pos_fraction: 0.7
+
+# ============================================================
+# Костяк (читает expds.pipeline_config; load_config роли 1 игнорирует)
+# ============================================================
+data:
+  sites_dir: data/synthetic
+  labels_file: labels.geojson
+  # Порядок = контракт модели (сохраняется в чекпойнт). aspect не берём: угол разрывен.
+  # point_density / mean_intensity в синтетике отсутствуют -> channel_mask = False.
+  channels:
+    - dtm
+    - slope
+    - hillshade_az_45
+    - hillshade_az_135
+    - hillshade_az_225
+    - hillshade_az_315
+    - slrm_sigma_8.0
+    - positive_openness
+    - negative_openness
+    - sky_view_factor
+    - curvature_sigma_2.0
+    - tpi_radius_5
+    - tri_radius_3
+    - point_density
+    - mean_intensity
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
+  # none | site_robust: (x - median) / (p98 - p2) по валидным пикселям участка.
+  normalize: site_robust
+
+targets:
+  classes: [mound, rampart, ditch]
+  # Сигма гаусса для точечных объектов, пиксели.
+  heatmap_sigma_px: 3.0
+
+tiles:
+  tile_px: 256
+  overlap_px: 32
+  # Доля тайлов с объектами при обучении (WeightedRandomSampler).
+  pos_fraction: 0.7
