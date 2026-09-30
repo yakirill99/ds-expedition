@@ -37,3 +37,5 @@ Thumbs.db
 
 # uv
 # uv.lock КОММИТИМ (правило команды)
+runs/
+dist/

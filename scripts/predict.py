@@ -1,18 +1,12 @@
-"""predict: точка входа. Заглушка — заменить на реальный пайплайн."""
+"""Инференс из репозитория: CLI как у inference/entrypoint.py, --config/--weights обязательны.
 
-import argparse
+uv run python scripts/predict.py --data data/synthetic/site_3 \
+    --config configs/dataset_synthetic.yaml --weights runs/<run>/best.pt --out pred.geojson
+"""
 
-import yaml
+import sys
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
-    print("predict:", cfg)
-
+from expds.predict import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

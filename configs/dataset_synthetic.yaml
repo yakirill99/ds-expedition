@@ -1,0 +1,280 @@
+# ============================================================
+# Конфиг синтетического датасета (отладка костяка end-to-end)
+# ============================================================
+# Секции 1:1 с dataset_raleigh.yaml — читается load_config роли 1.
+# Лидара нет: lidar/ground/dtm/cloud_features — заглушки для совместимости,
+# генератор их не использует. Параметры генератора — секция synthetic
+# (читает tools/make_synthetic.py).
+# ============================================================
+
+dataset:
+  name: synthetic
+  raw_dir: data/synthetic
+  cache_dir: data/synthetic
+  # Заглушка: load_config требует ключ, файла нет.
+  lidar_file: none.laz
+
+lidar:
+  source_z_unit: meters
+  target_z_unit: meters
+  source_xy_unit: meters
+  chunk_size: 1000000
+  max_points: null
+
+crs:
+  # UTM 37N — метрическая, центральная часть европейской России.
+  source: EPSG:32637
+  internal: EPSG:32637
+  # Регламент конкурса: разметка и выход в Web Mercator.
+  output: EPSG:3857
+
+grid:
+  # 1.0 м — стандарт для археологии.
+  pixel_size: 1.0
+  nodata: -9999.0
+
+logging:
+  level: INFO
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  datefmt: "%Y-%m-%d %H:%M:%S"
+  log_file: logs/synthetic.log
+
+# --- заглушки (не используются генератором) ---
+ground:
+  cell_size: 1.0
+  preset: soft
+  window_sizes: [3, 5, 7, 9, 11]
+  height_threshold: 0.5
+  slope_threshold: 0.2
+  max_iterations: 5
+  min_change_ratio: 0.001
+
+dtm:
+  statistic: mean
+  fill_method: idw
+  idw_k: 8
+  idw_power: 2.0
+  max_hole_pixels: 1000
+  artifact_window: 5
+  artifact_threshold: 2.0
+
+cloud_features:
+  # Облака точек нет -> каналы cloud отсутствуют (channel_mask = False в KozDataset).
+  enabled: []
+  nodata: -9999.0
+
+# --- используется: производные рельефа (build_relief_layers роли 1) ---
+relief:
+  hillshade_azimuths: [45, 135, 225, 315]
+  hillshade_altitude: 45.0
+  hillshade_z_factor: 1.0
+  # σ=8 px при 1 м — объекты 16–25 м (курганы).
+  slrm_sigmas: [8.0]
+  openness_radius: 5
+  openness_n_directions: 8
+  curvature_sigmas: [2.0]
+  tpi_radii: [5]
+  tri_radii: [3]
+
+align:
+  default_method: bilinear
+  max_shift: 5
+  confidence_threshold: 0.3
+
+# --- генератор синтетики ---
+synthetic:
+  out_dir: data/synthetic
+  n_sites: 3
+  # Размер участка, пиксели (квадрат).
+  size_px: 1024
+  seed: 0
+  # Левый нижний угол site_1 в crs.internal, метры. Участки идут на восток.
+  origin_x: 500000.0
+  origin_y: 6200000.0
+  site_spacing_m: 5000.0
+  # Объекты не ближе этого к краю участка, метры.
+  edge_margin_m: 20.0
+
+  background:
+    base_elevation_m: 150.0
+    # Std гладкого шума рельефа, метры.
+    amplitude_m: 3.0
+    # Масштаб шума, пиксели.
+    sigma_px: 120.0
+    # Максимальный уклон плоскости тренда, м/м.
+    max_tilt: 0.01
+
+  mounds:
+    count: [8, 15]
+    # Радиус разметки = 2σ гауссова холма.
+    radius_m: [4.0, 15.0]
+    height_m: [0.4, 2.0]
+    min_gap_m: 10.0
+    # Курган с radius <= этого значения размечается Point, иначе Polygon.
+    point_max_radius_m: 6.0
+
+  ramparts:
+    count: [2, 3]
+    length_m: [80.0, 250.0]
+    width_m: [4.0, 8.0]
+    # Высота вала, метры.
+    amplitude_m: [0.5, 1.5]
+
+  ditches:
+    count: [1, 2]
+    length_m: [60.0, 200.0]
+    width_m: [3.0, 6.0]
+    # Глубина рва, метры (знак минус ставит генератор).
+    amplitude_m: [0.4, 1.2]
+
+  rgb:
+    noise_std: 0.03
+    field_sigma_px: 40.0
+
+  mag:
+    dipole_count: [5, 10]
+    dipole_amplitude_nt: [5.0, 30.0]
+    dipole_sigma_m: 3.0
+    dipole_offset_m: 2.0
+    # Полосы от пахоты.
+    stripe_amplitude_nt: 2.0
+    stripe_period_m: 6.0
+    noise_std_nt: 0.5
+    # Доля участка (с юга) с магнитной съёмкой; остальное — nodata.
+    coverage: 0.8
+
+# ============================================================
+# Костяк (читает expds.pipeline_config; load_config роли 1 игнорирует)
+# ============================================================
+data:
+  sites_dir: data/synthetic
+  labels_file: labels.geojson
+  # Порядок = контракт модели (сохраняется в чекпойнт). aspect не берём: угол разрывен.
+  # point_density / mean_intensity в синтетике отсутствуют -> channel_mask = False.
+  channels:
+    - dtm
+    - slope
+    - hillshade_az_45
+    - hillshade_az_135
+    - hillshade_az_225
+    - hillshade_az_315
+    - slrm_sigma_8.0
+    - positive_openness
+    - negative_openness
+    - sky_view_factor
+    - curvature_sigma_2.0
+    - tpi_radius_5
+    - tri_radius_3
+    - point_density
+    - mean_intensity
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
+  # none | site_robust: (x - median) / (p98 - p2) по валидным пикселям участка.
+  normalize: site_robust
+
+targets:
+  classes: [mound, rampart, ditch]
+  # Сигма гаусса для точечных объектов, пиксели.
+  heatmap_sigma_px: 3.0
+
+tiles:
+  tile_px: 256
+  overlap_px: 32
+  # Доля тайлов с объектами при обучении (WeightedRandomSampler).
+  pos_fraction: 0.7
+
+# ============================================================
+# Костяк (читает expds.pipeline_config; load_config роли 1 игнорирует)
+# ============================================================
+data:
+  sites_dir: data/synthetic
+  labels_file: labels.geojson
+  # Порядок = контракт модели (сохраняется в чекпойнт). aspect не берём: угол разрывен.
+  # point_density / mean_intensity в синтетике отсутствуют -> channel_mask = False.
+  channels:
+    - dtm
+    - slope
+    - hillshade_az_45
+    - hillshade_az_135
+    - hillshade_az_225
+    - hillshade_az_315
+    - slrm_sigma_8.0
+    - positive_openness
+    - negative_openness
+    - sky_view_factor
+    - curvature_sigma_2.0
+    - tpi_radius_5
+    - tri_radius_3
+    - point_density
+    - mean_intensity
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
+  # none | site_robust: (x - median) / (p98 - p2) по валидным пикселям участка.
+  normalize: site_robust
+
+targets:
+  classes: [mound, rampart, ditch]
+  # Сигма гаусса для точечных объектов, пиксели.
+  heatmap_sigma_px: 3.0
+
+tiles:
+  tile_px: 256
+  overlap_px: 32
+  # Доля тайлов с объектами при обучении (WeightedRandomSampler).
+  pos_fraction: 0.7
+
+model:
+  arch: unet          # unet | stub (stub: CI/e2e)
+  encoder: resnet34   # encoder_weights всегда None (офлайн)
+  stub_kernel: 3
+  prior_prob: 0.01
+loss:
+  seg_weight: 1.0
+  hm_weight: 1.0
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  hm_beta: 2.0
+  hm_min_norm: 50.0
+  smooth: 1.0
+
+stitch:
+  window: hann   # hann | flat
+  eps: 0.001
+
+post:
+  seg_thr: 0.5
+  min_area_px: 16
+  simplify_px: 0.5
+  hm_thr: 0.3
+  peak_window_px: 7
+  point_radius_px: 4.0
+  point_vertices: 16
+  nms_radius_px: 6.0
+  max_detections: 2000
+
+eval:
+  iou_thr: 0.5
+  r_tol: 5.0
+  r_tol_units: crs   # crs | meters — уточнить по регламенту
+  iou_samples: 128
+  class_agnostic: false
+
+train:
+  epochs: 10
+  batch_size: 8
+  lr: 0.001
+  weight_decay: 0.0001
+  amp: true
+  device: auto
+  num_workers: 2
+  seed: 0
+  tiles_per_epoch: 512
+  train_sites: [site_1, site_2]
+  val_sites: [site_3]
+  runs_dir: runs
