@@ -28,10 +28,9 @@ from dataclasses import dataclass
 import numpy as np
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
-from rasterio.transform import Affine
 from rasterio.warp import reproject
 
-from expds.features.grid import Grid, Layer
+from expds.features.grid import Grid, Layer, grid_to_affine
 
 logger = logging.getLogger(__name__)
 
@@ -115,28 +114,6 @@ def _grids_equal(a: Grid, b: Grid) -> bool:
     return True
 
 
-def _build_transform(grid: Grid) -> Affine:
-    """Строит affine-трансформацию rasterio из Grid.
-
-    rasterio ожидает верхний левый угол.
-
-    Args:
-        grid: наша сетка.
-
-    Returns:
-        Affine для rasterio.
-    """
-    _, _, _, y_max = grid.bounds
-    return Affine(
-        grid.pixel_size,
-        0.0,
-        grid.x_min,
-        0.0,
-        -grid.pixel_size,
-        y_max,
-    )
-
-
 def resample_layer(
     layer: Layer,
     target_grid: Grid,
@@ -183,9 +160,9 @@ def resample_layer(
         method,
     )
 
-    src_transform = _build_transform(layer.grid)
+    src_transform = grid_to_affine(layer.grid)
     src_crs = CRS.from_user_input(layer.grid.crs)
-    dst_transform = _build_transform(target_grid)
+    dst_transform = grid_to_affine(target_grid)
     dst_crs = CRS.from_user_input(target_grid.crs)
 
     destination = np.full(target_grid.shape, layer.nodata, dtype=np.float32)
