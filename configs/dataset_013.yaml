@@ -1,0 +1,89 @@
+# ============================================================
+# Конфиг датасета 013_Nora_Vinnon (реальный лидар)
+# ============================================================
+# Сгенерирован scripts/make_config_from_site.py.
+# Источник: /media/sf_LinuxShared/хакатоны/Expedition/data/013_Нора_Виннон/013_Нора_Виннон/01_Нора_Виннон_La_точки/01_Нора_Виннон_La_точки.las
+# ============================================================
+
+
+dataset:
+  name: 013_Nora_Vinnon
+  raw_dir: /media/sf_LinuxShared/хакатоны/Expedition/data/013_Нора_Виннон/013_Нора_Виннон/01_Нора_Виннон_La_точки
+  cache_dir: data/cache/013_Nora_Vinnon
+  lidar_file: 01_Нора_Виннон_La_точки.las
+
+
+lidar:
+  source_z_unit: meters
+  target_z_unit: meters
+  source_xy_unit: meters
+  chunk_size: 1000000
+  max_points: null
+
+
+crs:
+  source: EPSG:25833
+  internal: EPSG:25833
+  output: EPSG:3857
+
+
+grid:
+  pixel_size: 1.0
+  nodata: -9999.0
+
+
+logging:
+  level: INFO
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  datefmt: "%Y-%m-%d %H:%M:%S"
+  log_file: logs/013_Nora_Vinnon.log
+
+
+ground:
+  cell_size: 1.0
+  preset: soft
+  window_sizes: [3, 5, 7, 9, 11]
+  height_threshold: 0.5
+  slope_threshold: 0.2
+  max_iterations: 5
+  min_change_ratio: 0.001
+
+
+dtm:
+  statistic: mean
+  fill_method: idw
+  idw_k: 8
+  idw_power: 2.0
+  max_hole_pixels: 1000
+  artifact_window: 5
+  artifact_threshold: 2.0
+
+
+relief:
+  hillshade_azimuths: [45, 135, 225, 315]
+  hillshade_altitude: 45.0
+  hillshade_z_factor: 1.0
+  slrm_sigmas: [2.0, 8.0, 32.0]
+  openness_radius: 10
+  openness_n_directions: 16
+  curvature_sigmas: [2.0, 8.0]
+  tpi_radii: [5, 15]
+  tri_radii: [3, 9]
+
+
+cloud_features:
+  enabled:
+    - point_density
+    - mean_intensity
+    - std_intensity
+    - non_first_return_ratio
+    - mean_return_number
+    - mean_z
+    - z_std
+  nodata: -9999.0
+
+
+align:
+  default_method: bilinear
+  max_shift: 5
+  confidence_threshold: 0.3
