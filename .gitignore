@@ -39,3 +39,7 @@ Thumbs.db
 # uv.lock КОММИТИМ (правило команды)
 runs/
 dist/
+
+# Локальные заметки (только у нас)
+NOTES.local.md
+*.local.md
