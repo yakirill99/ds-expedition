@@ -228,3 +228,48 @@ class TestStackLayers:
         sample = stack_layers(layers=[dtm], spec=spec)
         assert sample.tensor[0, 0, 0] == pytest.approx(42.0)
         assert sample.tensor[0, 1, 1] == pytest.approx(0.0)
+
+
+class TestGridToAffine:
+    """Тесты grid_to_affine."""
+
+    def test_known_grid(self, grid: Grid) -> None:
+        """Проверяет transform для известного Grid."""
+        from expds.features.grid import grid_to_affine
+
+        affine = grid_to_affine(grid)
+        # pixel_size по X и Y.
+        assert affine.a == pytest.approx(grid.pixel_size)
+        assert affine.e == pytest.approx(-grid.pixel_size)
+        # Верхний левый угол.
+        assert affine.c == pytest.approx(grid.x_min)
+        assert affine.f == pytest.approx(grid.y_max)
+        # Нет поворота.
+        assert affine.b == 0.0
+        assert affine.d == 0.0
+
+    def test_matches_north_up_convention(self, grid: Grid) -> None:
+        """grid_to_affine даёт transform для north-up (rasterio-конвенция).
+
+        Grid использует row 0 = юг, rasterio — row 0 = север.
+        Совпадение по Y достигается через переворот:
+            y_grid = y_min + (row + 0.5) * ps
+            y_rasterio = y_max - (row + 0.5) * ps
+        где row_rasterio = height - 1 - row_grid.
+        """
+        from expds.features.grid import grid_to_affine
+
+        affine = grid_to_affine(grid)
+        col, row_grid = 5, 3
+
+        # Координата в Grid-конвенции.
+        x_grid, y_grid = grid.transform_to_world(col=col, row=row_grid)
+
+        # Тот же пиксель в rasterio-конвенции (row 0 = север).
+        row_rasterio = grid.height - 1 - row_grid
+
+        x_rasterio = affine.c + (col + 0.5) * affine.a
+        y_rasterio = affine.f + (row_rasterio + 0.5) * affine.e
+
+        assert x_rasterio == pytest.approx(x_grid)
+        assert y_rasterio == pytest.approx(y_grid)

@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from rasterio.transform import Affine
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +177,34 @@ class Grid:
         """
         bx_min, by_min, bx_max, by_max = self.bounds
         return (bx_min <= x <= bx_max) and (by_min <= y <= by_max)
+
+
+def grid_to_affine(grid: Grid) -> "Affine":
+    """Строит affine-трансформацию rasterio из Grid.
+
+    rasterio ожидает верхний левый угол:
+        transform = Affine(pixel_size, 0, x_min, 0, -pixel_size, y_max)
+
+    Это единственное место в проекте, где Grid ↔ rasterio transform.
+    Используется в io/raster.py и features/align.py.
+
+    Args:
+        grid: наша сетка.
+
+    Returns:
+        Affine для rasterio.
+    """
+    from rasterio.transform import Affine
+
+    _, _, _, y_max = grid.bounds
+    return Affine(
+        grid.pixel_size,
+        0.0,
+        grid.x_min,
+        0.0,
+        -grid.pixel_size,
+        y_max,
+    )
 
 
 @dataclass(frozen=True)
