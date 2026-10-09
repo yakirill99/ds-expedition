@@ -1,0 +1,48 @@
+# Реальный датасет организаторов. Слои лежат вне git (Яндекс.Диск).
+# Реестр ссылок — data/README.md. Пути подставь под фактическую раскладку.
+name: dataset_real
+tile: 512
+overlap: 128
+r_tolerance: 15.0
+iou_threshold: 0.5
+sigma_px: 10.0
+r_nms: 12.0
+
+classes:
+  0: background
+  1: kurgan
+  2: ditch
+  3: dipole
+
+layers:
+  - name: dtm
+    group: relief
+    glob: "*.tif"
+    kind: raster
+    optional: false
+  - name: hillshade
+    group: relief
+    glob: "hillshade*.tif"
+    kind: raster
+    optional: true
+  - name: rgb
+    group: optic
+    glob: "rgb*.tif"
+    kind: raster
+    optional: true
+  - name: mag
+    group: geo
+    glob: "mag*.tif"
+    kind: raster
+    optional: true
+  - name: gpr_slice
+    group: geo
+    glob: "gpr*.tif"
+    kind: raster
+    optional: true
+
+sites:
+  - site_id: site_1
+    root: data/raw/site_1
+    grid: null
+    layers: {}
