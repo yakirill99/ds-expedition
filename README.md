@@ -9,6 +9,10 @@ make setup      # uv sync + pre-commit
 make test
 ```
 
+## Требования к окружению
+- Linux/Windows: сборка PyTorch cu130, нужен драйвер NVIDIA ≥ 580 и GPU не старше Turing (RTX 20xx и новее).
+- macOS: CPU-сборка, обучение на GPU недоступно.
+
 ## Модули (`src/expds/`)
 | Модуль | Владелец | Назначение |
 |---|---|---|
