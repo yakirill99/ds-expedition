@@ -67,9 +67,101 @@ def read_labels_geojson(
     return points
 
 
+def read_labels_polygons(
+    path: Path,
+    target_crs: str,
+) -> list[list[tuple[float, float]]]:
+    """Читает GeoJSON, возвращает список полигонов (контуров).
+
+    Каждый полигон — список (x, y) в target_crs. Polygon превращается
+    в свой контур, Point — в маленький квадрат вокруг точки.
+
+    Args:
+        path: путь к GeoJSON.
+        target_crs: CRS слоёв.
+
+    Returns:
+        Список полигонов: [[(x1, y1), (x2, y2), ...], ...].
+    """
+    from pyproj import Transformer
+
+    transformer = Transformer.from_crs("EPSG:3857", target_crs, always_xy=True)
+
+    with path.open() as f:
+        data = json.load(f)
+
+    polygons: list[list[tuple[float, float]]] = []
+    for feat in data["features"]:
+        geom = feat.get("geometry")
+        if geom is None:
+            continue
+        if geom["type"] == "Polygon":
+            ring = geom["coordinates"][0]
+            transformed = [transformer.transform(x, y) for x, y in ring]
+            polygons.append(transformed)
+        elif geom["type"] == "Point":
+            x, y = transformer.transform(*geom["coordinates"])
+            half = 2.0  # 2 м — размер квадрата для точечных объектов
+            polygons.append(
+                [
+                    (x - half, y - half),
+                    (x + half, y - half),
+                    (x + half, y + half),
+                    (x - half, y + half),
+                    (x - half, y - half),
+                ]
+            )
+    return polygons
+
+
+def plot_polygons(
+    ax,
+    polygons: list[list[tuple[float, float]]],
+    grid,
+    edge_color: str = "red",
+    fill_color: str = "red",
+    alpha: float = 0.2,
+    linewidth: float = 1.5,
+) -> None:
+    """Рисует контуры полигонов разметки на осях.
+
+    Args:
+        ax: оси matplotlib.
+        polygons: список полигонов [(x, y), ...] в CRS слоёв.
+        grid: Grid слоёв (для перевода в пиксели).
+        edge_color: цвет контура.
+        fill_color: цвет заливки.
+        alpha: прозрачность заливки.
+        linewidth: толщина контура.
+    """
+    from matplotlib.patches import Polygon as MplPolygon
+
+    for ring in polygons:
+        if len(ring) < 3:
+            continue
+        # Переводим мировые координаты в пиксели слоя.
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        cols, rows = grid.transform_to_pixel(np.array(xs), np.array(ys))
+        # imshow с origin='lower': row 0 = низ = y_min. Grid: row 0 = юг.
+        # Совпадает, инверсия не нужна.
+        verts = list(zip(cols, rows, strict=True))
+
+        patch = MplPolygon(
+            verts,
+            closed=True,
+            edgecolor=edge_color,
+            facecolor=fill_color,
+            alpha=alpha,
+            linewidth=linewidth,
+        )
+        ax.add_patch(patch)
+
+
 def plot_layer_with_labels(
     layer_path: Path,
     labels: list[tuple[float, float, str]],
+    polygons: list[list[tuple[float, float]]],
     output_path: Path,
     cmap: str = "terrain",
     vmin: float | None = None,
@@ -83,16 +175,18 @@ def plot_layer_with_labels(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        extent=layer.grid.bounds[:2] + layer.grid.bounds[2:],
+        extent=(
+            layer.grid.x_min,
+            layer.grid.x_max,
+            layer.grid.y_min,
+            layer.grid.y_max,
+        ),
         origin="lower",
     )
     # Точки разметки — в 3857, нужно перепроецировать в internal.
     # Пока строим как есть, для отладки.
-    if labels:
-        xs = [p[0] for p in labels]
-        ys = [p[1] for p in labels]
-        ax.scatter(xs, ys, c="red", s=20, alpha=0.7, label="labels (3857)")
-        ax.legend()
+    if polygons:
+        plot_polygons(ax, polygons, layer.grid)
     plt.colorbar(im, ax=ax, fraction=0.03)
     ax.set_title(layer_path.stem)
     plt.tight_layout()
@@ -223,15 +317,19 @@ def main() -> int:
     print(f"CRS слоёв: {target_crs}")
 
     labels = []
+    polygons = []
     if args.labels and args.labels.exists():
         for gj in args.labels.rglob("*.geojson"):
             labels.extend(read_labels_geojson(gj, target_crs=target_crs))
+            polygons.extend(read_labels_polygons(gj, target_crs=target_crs))
         print(f"Разметка: {len(labels)} объектов (перепроецировано в {target_crs})")
+        print(f"Полигонов: {len(polygons)}")
 
     # DTM.
     plot_layer_with_labels(
         layer_path=site_dir / "dtm.tif",
         labels=labels,
+        polygons=polygons,
         output_path=audit_dir / "dtm.png",
         cmap="terrain",
     )
@@ -239,6 +337,7 @@ def main() -> int:
     plot_layer_with_labels(
         layer_path=site_dir / "slrm_sigma_8.0.tif",
         labels=labels,
+        polygons=polygons,
         output_path=audit_dir / "slrm_sigma_8.png",
         cmap="RdBu_r",
         vmin=-2,
@@ -248,6 +347,7 @@ def main() -> int:
     plot_layer_with_labels(
         layer_path=site_dir / "hillshade_az_315.tif",
         labels=labels,
+        polygons=polygons,
         output_path=audit_dir / "hillshade.png",
         cmap="gray",
     )
