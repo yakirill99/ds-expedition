@@ -437,6 +437,7 @@ def _run_pipeline(
             curvature_sigmas=config.relief.curvature_sigmas,
             tpi_radii=config.relief.tpi_radii,
             tri_radii=config.relief.tri_radii,
+            nodata=dtm_layer.nodata,
         )
         relief_layers = {
             name: Layer(
