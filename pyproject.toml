@@ -15,6 +15,7 @@ dependencies = [
     "torch>=2.14.0",
     "segmentation-models-pytorch>=0.5.0",
     "scikit-image>=0.26.0",
+    "matplotlib>=3.11.2",
 ]
 
 [dependency-groups]
