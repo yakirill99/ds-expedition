@@ -29,7 +29,7 @@ make runserver
 ```
 
 - `web/config/` — настройки проекта.
-- `web/apps/api/` — REST API (`/api/health/`, `/api/predict/`).
+- `web/apps/api/` — REST API (`/api/health/`, `/api/predict/`) + Swagger UI.
 - `web/apps/jobs/` — management-команды (`train`, `predict`) и модель `InferenceJob`.
 - `web/apps/viz/` — заглушка под визуализацию.
 - Тесты — в `tests/web/`.
@@ -39,6 +39,9 @@ make runserver
 - `make migrate` / `make makemigrations` — миграции.
 - `make djcheck` — проверка настроек.
 - `make test-web` — Django-тесты.
+- Swagger UI: `http://127.0.0.1:8000/api/docs/`
+- OpenAPI schema: `http://127.0.0.1:8000/api/schema/`
+- ReDoc: `http://127.0.0.1:8000/api/redoc/`
 
 ## Ветки
 `main` ← `develop` ← `feature/<модуль>-<задача>`, `exp/<автор>-<идея>`.

@@ -18,6 +18,7 @@ dependencies = [
     "django>=5.1",
     "djangorestframework",
     "django-environ",
+    "drf-spectacular",
 ]
 
 [dependency-groups]
