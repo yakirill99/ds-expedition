@@ -55,6 +55,13 @@ def read_labels_geojson(
             ys = [c[1] for c in coords]
             x_3857 = sum(xs) / len(xs)
             y_3857 = sum(ys) / len(ys)
+        elif geom["type"] == "MultiPolygon":
+            # Берём первый полигон из мультиполигона.
+            coords = geom["coordinates"][0][0]
+            xs = [c[0] for c in coords]
+            ys = [c[1] for c in coords]
+            x_3857 = sum(xs) / len(xs)
+            y_3857 = sum(ys) / len(ys)
         elif geom["type"] == "Point":
             x_3857 = geom["coordinates"][0]
             y_3857 = geom["coordinates"][1]
@@ -99,6 +106,12 @@ def read_labels_polygons(
             ring = geom["coordinates"][0]
             transformed = [transformer.transform(x, y) for x, y in ring]
             polygons.append(transformed)
+        elif geom["type"] == "MultiPolygon":
+            # Каждый вложенный полигон — отдельный контур.
+            for poly in geom["coordinates"]:
+                ring = poly[0]
+                transformed = [transformer.transform(x, y) for x, y in ring]
+                polygons.append(transformed)
         elif geom["type"] == "Point":
             x, y = transformer.transform(*geom["coordinates"])
             half = 2.0  # 2 м — размер квадрата для точечных объектов
@@ -120,8 +133,8 @@ def plot_polygons(
     grid,
     edge_color: str = "red",
     fill_color: str = "red",
-    alpha: float = 0.2,
-    linewidth: float = 1.5,
+    alpha: float = 0.4,
+    linewidth: float = 3.0,
 ) -> None:
     """Рисует контуры полигонов разметки на осях.
 
@@ -158,6 +171,77 @@ def plot_polygons(
         ax.add_patch(patch)
 
 
+def plot_layer_zoomed(
+    layer_path: Path,
+    polygons: list[list[tuple[float, float]]],
+    output_path: Path,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    cmap: str = "gray",
+) -> None:
+    """Строит слой с зумом на заданную область (мировые координаты).
+
+    Args:
+        layer_path: путь к слою.
+        polygons: полигоны разметки в CRS слоя.
+        output_path: путь к PNG.
+        x_range: (x_min, x_max) — область зума в мировых координатах.
+        y_range: (y_min, y_max) — область зума.
+        cmap: цветовая схема.
+    """
+    layer = read_raster(layer_path)
+
+    # Область зума.
+    x_min, x_max = x_range
+    y_min, y_max = y_range
+
+    # Переводим в пиксельные индексы.
+    col_min, row_min = layer.grid.transform_to_pixel(x_min, y_min)
+    col_max, row_max = layer.grid.transform_to_pixel(x_max, y_max)
+    col_min = max(0, int(np.floor(col_min)))
+    row_min = max(0, int(np.floor(row_min)))
+    col_max = min(layer.grid.width, int(np.ceil(col_max)))
+    row_max = min(layer.grid.height, int(np.ceil(row_max)))
+
+    crop = layer.data[row_min:row_max, col_min:col_max]
+    if crop.size == 0:
+        print(f"  Пропускаем {layer_path.stem}: пустой кроп")
+        return
+
+    # Локальные перцентили.
+    valid = crop != layer.nodata
+    if valid.any():
+        lo, hi = np.percentile(crop[valid], [2, 98])
+    else:
+        lo, hi = 0.0, 1.0
+
+    fig, ax = plt.subplots(figsize=(14, 14))
+    ax.imshow(
+        crop,
+        cmap=cmap,
+        vmin=lo,
+        vmax=hi,
+        extent=(x_min, x_max, y_min, y_max),
+        origin="lower",
+    )
+
+    # Полигоны рисуем в мировых координатах через ax.plot.
+    for ring in polygons:
+        if len(ring) < 3:
+            continue
+        xs = [p[0] for p in ring] + [ring[0][0]]
+        ys = [p[1] for p in ring] + [ring[0][1]]
+        ax.plot(xs, ys, color="red", linewidth=2.0, alpha=0.8)
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_title(f"{layer_path.stem} (zoom)")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=100)
+    plt.close()
+    print(f"Сохранено: {output_path}")
+
+
 def plot_layer_with_labels(
     layer_path: Path,
     labels: list[tuple[float, float, str]],
@@ -170,6 +254,18 @@ def plot_layer_with_labels(
     """Строит слой + точки разметки, сохраняет PNG."""
     layer = read_raster(layer_path)
     fig, ax = plt.subplots(figsize=(12, 12))
+
+    # Локальные шкалы — по перцентилям валидных пикселей.
+    valid = layer.data != layer.nodata
+    if valid.any():
+        if vmin is None:
+            vmin = float(np.percentile(layer.data[valid], 2))
+        if vmax is None:
+            vmax = float(np.percentile(layer.data[valid], 98))
+    else:
+        vmin = 0.0
+        vmax = 1.0
+
     im = ax.imshow(
         layer.data,
         cmap=cmap,
@@ -325,44 +421,67 @@ def main() -> int:
         print(f"Разметка: {len(labels)} объектов (перепроецировано в {target_crs})")
         print(f"Полигонов: {len(polygons)}")
 
-    # DTM.
-    plot_layer_with_labels(
-        layer_path=site_dir / "dtm.tif",
-        labels=labels,
-        polygons=polygons,
-        output_path=audit_dir / "dtm.png",
-        cmap="terrain",
-    )
-    # SLRM sigma=8 — главный признак для курганов.
-    plot_layer_with_labels(
-        layer_path=site_dir / "slrm_sigma_8.0.tif",
-        labels=labels,
-        polygons=polygons,
-        output_path=audit_dir / "slrm_sigma_8.png",
-        cmap="RdBu_r",
-        vmin=-2,
-        vmax=2,
-    )
-    # Hillshade.
-    plot_layer_with_labels(
-        layer_path=site_dir / "hillshade_az_315.tif",
-        labels=labels,
-        polygons=polygons,
-        output_path=audit_dir / "hillshade.png",
-        cmap="gray",
-    )
+    # Все слои из layers/ — строим картинку для каждого.
+    # Пропускаем огромные (больше 2000x2000) — они не поместятся.
+    layer_files = sorted(site_dir.glob("*.tif"))
+    print(f"Слоёв для аудита: {len(layer_files)}")
 
-    # Зум на все курганы.
-    grid = read_raster(site_dir / "dtm.tif").grid
-    for i in range(len(labels)):
-        zoom_one_mound(
-            site_dir=site_dir,
-            audit_dir=audit_dir,
+    for layer_path in layer_files:
+        # Выбираем cmap по имени слоя.
+        name = layer_path.stem
+        if "slrm" in name or "tpi" in name or "curvature" in name:
+            cmap = "RdBu_r"
+        elif "hillshade" in name:
+            cmap = "gray"
+        elif "slope" in name:
+            cmap = "viridis"
+        elif "aspect" in name:
+            cmap = "hsv"
+        else:
+            cmap = "gray"
+
+        plot_layer_with_labels(
+            layer_path=layer_path,
             labels=labels,
-            grid=grid,
-            index=i,
-            half_m=25.0,
+            polygons=polygons,
+            output_path=audit_dir / f"{name}.png",
+            cmap=cmap,
         )
+
+    # Зум на область разметки — если есть полигоны.
+    if polygons:
+        all_x = [p[0] for poly in polygons for p in poly]
+        all_y = [p[1] for poly in polygons for p in poly]
+        # Запас 10%.
+        span_x = max(all_x) - min(all_x)
+        span_y = max(all_y) - min(all_y)
+        x_range = (min(all_x) - 0.1 * span_x, max(all_x) + 0.1 * span_x)
+        y_range = (min(all_y) - 0.1 * span_y, max(all_y) + 0.1 * span_y)
+        print(f"Зум: x={x_range[0]:.1f}..{x_range[1]:.1f}, y={y_range[0]:.1f}..{y_range[1]:.1f}")
+
+        for layer_path in layer_files:
+            plot_layer_zoomed(
+                layer_path=layer_path,
+                polygons=polygons,
+                output_path=audit_dir / f"{layer_path.stem}_zoom.png",
+                x_range=x_range,
+                y_range=y_range,
+                cmap="gray",
+            )
+
+    # Зум на курганы — только если есть dtm.tif (лидарный участок).
+    dtm_path = site_dir / "dtm.tif"
+    if dtm_path.exists() and labels:
+        grid = read_raster(dtm_path).grid
+        for i in range(len(labels)):
+            zoom_one_mound(
+                site_dir=site_dir,
+                audit_dir=audit_dir,
+                labels=labels,
+                grid=grid,
+                index=i,
+                half_m=25.0,
+            )
     return 0
 
 
