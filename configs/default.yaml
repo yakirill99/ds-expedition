@@ -1,43 +1,34 @@
-# ============================================================
-# Конфиг датасета 013_Nora_Vinnon (реальный лидар)
-# ============================================================
-# Сгенерирован scripts/make_config_from_site.py.
-# Источник: /media/sf_LinuxShared/хакатоны/Expedition/data/013_Нора_Виннон/013_Нора_Виннон/01_Нора_Виннон_La_точки/01_Нора_Виннон_La_точки.las
-# ============================================================
-
+# Общий конфиг пайплайна Data/Geo.
+# Значения dataset/crs/lidar подставляются автоматически
+# из папки участка. Остальное — единое для всех.
 
 dataset:
-  name: 013_Nora_Vinnon
-  raw_dir: /media/sf_LinuxShared/хакатоны/Expedition/data/013_Нора_Виннон/013_Нора_Виннон/01_Нора_Виннон_La_точки
-  cache_dir: data/cache/013_Nora_Vinnon
-  lidar_file: 01_Нора_Виннон_La_точки.las
-
+  name: null
+  raw_dir: null
+  cache_dir: null
+  lidar_file: null
 
 lidar:
-  source_z_unit: meters
+  source_z_unit: null
   target_z_unit: meters
   source_xy_unit: meters
   chunk_size: 1000000
   max_points: null
 
-
 crs:
-  source: EPSG:25833
-  internal: EPSG:25833
+  source: null
+  internal: null
   output: EPSG:3857
-
 
 grid:
   pixel_size: 1.0
   nodata: -9999.0
 
-
 logging:
   level: INFO
   format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
   datefmt: "%Y-%m-%d %H:%M:%S"
-  log_file: logs/013_Nora_Vinnon.log
-
+  log_file: null
 
 ground:
   cell_size: 1.0
@@ -48,7 +39,6 @@ ground:
   max_iterations: 5
   min_change_ratio: 0.001
 
-
 dtm:
   statistic: mean
   fill_method: idw
@@ -57,7 +47,6 @@ dtm:
   max_hole_pixels: 1000
   artifact_window: 5
   artifact_threshold: 2.0
-
 
 relief:
   hillshade_azimuths: [45, 135, 225, 315]
@@ -70,7 +59,6 @@ relief:
   tpi_radii: [5, 15]
   tri_radii: [3, 9]
 
-
 cloud_features:
   enabled:
     - point_density
@@ -81,7 +69,6 @@ cloud_features:
     - mean_z
     - z_std
   nodata: -9999.0
-
 
 align:
   default_method: bilinear

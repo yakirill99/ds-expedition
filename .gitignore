@@ -10,7 +10,8 @@ __pycache__/
 venv/
 
 # Data (не коммитим)
-/data/
+/data/*
+!/data/README.md
 *.las
 *.laz
 *.tif
