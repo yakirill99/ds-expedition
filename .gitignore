@@ -45,4 +45,5 @@ dist/
 web/db.sqlite3
 web/static_collected/
 web/media/
+web/tiles/
 web/config/settings_local.py

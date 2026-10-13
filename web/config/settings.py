@@ -91,6 +91,15 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# --- Хранилище карт (тайлов) ---
+# Сейчас используется файловая система; для перехода на S3 достаточно
+# поменять MAP_STORAGE_BACKEND на "s3" и задать MAP_S3_* в .env.
+MAP_STORAGE_BACKEND = env("MAP_STORAGE_BACKEND", default="filesystem")
+MAP_STORAGE_ROOT = Path(env("MAP_STORAGE_ROOT", default=str(BASE_DIR / "tiles")))
+MAP_TILE_URL_PREFIX = env("MAP_TILE_URL_PREFIX", default="/tiles/")
+MAP_S3_BUCKET = env("MAP_S3_BUCKET", default="")
+MAP_S3_ENDPOINT_URL = env("MAP_S3_ENDPOINT_URL", default="")
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
