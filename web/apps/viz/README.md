@@ -20,14 +20,45 @@
 | `MAP_S3_BUCKET` | S3-бакет (будущее) | — |
 | `MAP_S3_ENDPOINT_URL` | S3 endpoint (будущее) | — |
 
-### Импорт локации
+### Формат данных локации
 
-Команда сканирует папку `<tiles-dir>/<slug>` и создаёт записи `Location` и `MapLayer`:
+Рекомендуемая структура описана в `docs/LOCATION_FORMAT.md`. Кратко:
+
+```text
+data/<location>/
+  manifest.json          # slug, name, center, zoom
+  tiles/
+    satellite/{z}/{x}/{y}.png
+    lidar/{z}/{x}/{y}.png
+```
+
+### Подготовка тайлов из исходных данных
 
 ```bash
-python web/manage.py import_location \\
+uv run python scripts/prepare_tiles.py \\
+    --location data/001_Гнёздово_Нивленское \\
+    --output web/tiles \\
+    --zooms 13 14 15 16 \\
+    --crs 32636
+```
+
+Скрипт поддерживает:
+- GeoTIFF (`*.tif`) → нарезка в тайлы;
+- LAS-облака точек (`*.las`) → растрирование по высоте `z` → тайлы;
+- GeoJSON-разметку → копируется рядом с тайлами (пока не отображается).
+
+### Импорт локации
+
+```bash
+# С manifest.json (центр и название подтянутся автоматически)
+uv run python web/manage.py import_location \\
+    --tiles-dir web/tiles \\
+    --slug 001-gnezdovo-nivlenskoe
+
+# Без manifest.json — параметры передаются явно
+uv run python web/manage.py import_location \\
     --name "Участок 1" --slug uchastok-1 \\
-    --tiles-dir data/tiles --lat 55.75 --lon 37.61 --zoom 14
+    --tiles-dir web/tiles --lat 55.75 --lon 37.61 --zoom 14
 ```
 
 После импорта тайлы доступны по URL:

@@ -22,7 +22,16 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "pre-commit", "nbstripout", "pytest-django", "django-debug-toolbar"]
+dev = [
+    "pytest",
+    "ruff",
+    "pre-commit",
+    "nbstripout",
+    "pytest-django",
+    "django-debug-toolbar",
+    "mercantile>=1.2.1",
+    "pillow>=12.3.0",
+]
 
 [tool.ruff]
 line-length = 100

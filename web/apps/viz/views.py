@@ -6,7 +6,7 @@ import mimetypes
 from pathlib import Path
 
 from django.http import FileResponse, HttpResponseNotFound, JsonResponse
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_GET
 
 from .models import Location
@@ -15,8 +15,8 @@ from .storage import TilePath, get_map_storage
 
 @require_GET
 def index(request):
-    """Заглушка главной страницы визуализации."""
-    return JsonResponse({"detail": "viz index"})
+    """Главная страница визуализации с интерактивной картой."""
+    return render(request, "viz/map.html")
 
 
 @require_GET
