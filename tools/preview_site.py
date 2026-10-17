@@ -13,6 +13,7 @@
 Зависимости: laspy, rasterio, pyproj, numpy, scipy, matplotlib.
 geopandas и shapely НЕ используются — полигоны рисуются через matplotlib.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,8 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -47,6 +49,7 @@ except ImportError:
 # Примитивы
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BBox:
     xmin: float
@@ -68,16 +71,22 @@ class BBox:
         return self.width * self.height
 
     def intersects(self, other: "BBox") -> bool:
-        return not (self.xmax <= other.xmin or other.xmax <= self.xmin
-                    or self.ymax <= other.ymin or other.ymax <= self.ymin)
+        return not (
+            self.xmax <= other.xmin
+            or other.xmax <= self.xmin
+            or self.ymax <= other.ymin
+            or other.ymax <= self.ymin
+        )
 
     def intersection(self, other: "BBox") -> Optional["BBox"]:
         _warn_if_crs_unknown(self, other)
         if not self.intersects(other):
             return None
         return BBox(
-            max(self.xmin, other.xmin), max(self.ymin, other.ymin),
-            min(self.xmax, other.xmax), min(self.ymax, other.ymax),
+            max(self.xmin, other.xmin),
+            max(self.ymin, other.ymin),
+            min(self.xmax, other.xmax),
+            min(self.ymax, other.ymax),
             crs=self.crs or other.crs,
         )
 
@@ -107,19 +116,20 @@ def _warn_if_crs_unknown(a: BBox, b: BBox) -> None:
     if ca is None or cb is None:
         warnings.warn(
             f"CRS не определён у одного из bbox ({ca} vs {cb}); "
-            f"результат может быть бессмысленным."
+            f"результат может быть бессмысленным.",
+            stacklevel=2,
         )
 
 
 def _bbox_from_las_header(header, crs) -> BBox:
     mins, maxs = header.mins, header.maxs
-    return BBox(float(mins[0]), float(mins[1]),
-                float(maxs[0]), float(maxs[1]), crs=crs)
+    return BBox(float(mins[0]), float(mins[1]), float(maxs[0]), float(maxs[1]), crs=crs)
 
 
 # ---------------------------------------------------------------------------
 # Чтение
 # ---------------------------------------------------------------------------
+
 
 def read_las(path: Path, chunk_size: int = 5_000_000):
     """Читает LAS чанками. Возвращает (xyz, classification, header, crs_or_None)."""
@@ -153,9 +163,13 @@ def read_raster(path: Path, band: int = 1):
     with rasterio.open(path) as src:
         data = src.read(band).astype(np.float32)
         data = np.flipud(data)
-        bbox = BBox(src.bounds.left, src.bounds.bottom,
-                    src.bounds.right, src.bounds.top,
-                    crs=str(src.crs) if src.crs else None)
+        bbox = BBox(
+            src.bounds.left,
+            src.bounds.bottom,
+            src.bounds.right,
+            src.bounds.top,
+            crs=str(src.crs) if src.crs else None,
+        )
         transform = src.transform
         crs = str(src.crs) if src.crs else None
     return data, bbox, transform, crs
@@ -169,9 +183,7 @@ def read_labels(path: Path, expected_crs=None):
     file_crs = gj.get("crs", {}).get("properties", {}).get("name")
     if expected_crs is not None and file_crs is not None:
         if str(expected_crs) != str(file_crs):
-            raise ValueError(
-                f"CRS mismatch: file={file_crs}, expected={expected_crs}."
-            )
+            raise ValueError(f"CRS mismatch: file={file_crs}, expected={expected_crs}.")
 
     polygons = []
     for feat in gj.get("features", []):
@@ -196,8 +208,8 @@ def read_labels(path: Path, expected_crs=None):
 # Обработка
 # ---------------------------------------------------------------------------
 
-def build_dtm(xyz: np.ndarray, cls: np.ndarray,
-              res_m: float, agg: str) -> tuple[np.ndarray, BBox]:
+
+def build_dtm(xyz: np.ndarray, cls: np.ndarray, res_m: float, agg: str) -> tuple[np.ndarray, BBox]:
     """DTM из точек класса 2. Фикс: inf вместо nan при minimum/maximum.at."""
     ground = cls == 2
     if ground.sum() == 0:
@@ -239,6 +251,7 @@ def build_dtm(xyz: np.ndarray, cls: np.ndarray,
 
 def fill_nearest(grid: np.ndarray) -> np.ndarray:
     from scipy.ndimage import distance_transform_edt
+
     mask = np.isnan(grid)
     if not mask.any():
         return grid
@@ -246,8 +259,7 @@ def fill_nearest(grid: np.ndarray) -> np.ndarray:
     return grid[tuple(idx)]
 
 
-def reproject_polygons(polygons: list[np.ndarray],
-                       src_crs, dst_crs) -> list[np.ndarray]:
+def reproject_polygons(polygons: list[np.ndarray], src_crs, dst_crs) -> list[np.ndarray]:
     if Transformer is None:
         raise ImportError("pyproj не установлен")
     if src_crs is None or dst_crs is None:
@@ -276,6 +288,7 @@ def overlay_polygons(ax, polygons: list[np.ndarray], color="red", lw=1.2) -> Non
 # ---------------------------------------------------------------------------
 # Сборка превью
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PreviewConfig:
@@ -308,19 +321,22 @@ def make_preview(cfg: PreviewConfig) -> None:
         if las_crs_header is None and cfg.las_crs is not None:
             print(f"LAS: CRS не в header, используем --las-crs={cfg.las_crs}")
         if las_crs is None:
-            print("LAS: CRS неизвестен (нет в header и не задан --las-crs). "
-                  "Разметка на облако накладываться не будет.")
+            print(
+                "LAS: CRS неизвестен (нет в header и не задан --las-crs). "
+                "Разметка на облако накладываться не будет."
+            )
 
         print(f"LAS: {len(xyz):,} точек, CRS={las_crs}, bbox={las_bbox}")
 
         if len(xyz) > cfg.max_points:
             step = len(xyz) // cfg.max_points + 1
-            xyz_p, cls_p = xyz[::step], cls[::step]
+            xyz_p = xyz[::step]
         else:
-            xyz_p, cls_p = xyz, cls
+            xyz_p = xyz
 
-        axes[0].scatter(xyz_p[:, 0], xyz_p[:, 1],
-                        c=xyz_p[:, 2], s=0.1, cmap="terrain", linewidths=0)
+        axes[0].scatter(
+            xyz_p[:, 0], xyz_p[:, 1], c=xyz_p[:, 2], s=0.1, cmap="terrain", linewidths=0
+        )
         axes[0].set_title(f"LiDAR ({len(xyz_p):,}/{len(xyz):,} точек)")
         axes[0].set_aspect("equal")
 
@@ -330,10 +346,12 @@ def make_preview(cfg: PreviewConfig) -> None:
         axes[1].imshow(
             dtm_filled,
             extent=[dtm_bbox.xmin, dtm_bbox.xmax, dtm_bbox.ymin, dtm_bbox.ymax],
-            origin="lower", cmap="terrain",
+            origin="lower",
+            cmap="terrain",
         )
-        axes[1].set_title(f"DTM {cfg.agg}, res={cfg.res_m} м "
-                          f"(NaN: {np.isnan(dtm).mean()*100:.1f}%)")
+        axes[1].set_title(
+            f"DTM {cfg.agg}, res={cfg.res_m} м (NaN: {np.isnan(dtm).mean() * 100:.1f}%)"
+        )
         axes[1].set_aspect("equal")
 
     # --- разметка ---
@@ -350,9 +368,9 @@ def make_preview(cfg: PreviewConfig) -> None:
         rdata, raster_bbox, _, raster_crs = read_raster(cfg.raster, band=cfg.band)
         axes[2].imshow(
             rdata,
-            extent=[raster_bbox.xmin, raster_bbox.xmax,
-                    raster_bbox.ymin, raster_bbox.ymax],
-            origin="lower", cmap="gray",
+            extent=[raster_bbox.xmin, raster_bbox.xmax, raster_bbox.ymin, raster_bbox.ymax],
+            origin="lower",
+            cmap="gray",
         )
         axes[2].set_title(f"Raster band {cfg.band}, CRS={raster_crs}")
         axes[2].set_aspect("equal")
@@ -395,11 +413,16 @@ def make_preview(cfg: PreviewConfig) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> PreviewConfig:
     p = argparse.ArgumentParser(description="Preview raw geodata (visual QA).")
     p.add_argument("--las", type=Path, default=None)
-    p.add_argument("--las-crs", type=str, default=None,
-                   help="CRS лидара, если в header его нет (напр. EPSG:32636)")
+    p.add_argument(
+        "--las-crs",
+        type=str,
+        default=None,
+        help="CRS лидара, если в header его нет (напр. EPSG:32636)",
+    )
     p.add_argument("--labels", type=Path, default=None)
     p.add_argument("--raster", type=Path, default=None)
     p.add_argument("--band", type=int, default=1)
@@ -411,10 +434,17 @@ def parse_args() -> PreviewConfig:
     p.add_argument("--dpi", type=int, default=150)
     a = p.parse_args()
     return PreviewConfig(
-        las=a.las, labels=a.labels, raster=a.raster,
-        las_crs=a.las_crs, band=a.band,
-        res_m=a.res_m, agg=a.agg, pad_m=a.pad_m,
-        max_points=a.max_points, out=a.out, dpi=a.dpi,
+        las=a.las,
+        labels=a.labels,
+        raster=a.raster,
+        las_crs=a.las_crs,
+        band=a.band,
+        res_m=a.res_m,
+        agg=a.agg,
+        pad_m=a.pad_m,
+        max_points=a.max_points,
+        out=a.out,
+        dpi=a.dpi,
     )
 
 
