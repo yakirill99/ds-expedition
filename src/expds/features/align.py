@@ -434,3 +434,180 @@ def check_alignment(
         reference_name,
     )
     return AlignmentReport(reference=reference_name, shifts=shifts)
+
+
+# ============================================================
+# Перепроецирование между CRS
+# ============================================================
+
+
+def reproject_layer_to_crs(
+    layer: Layer,
+    target_crs: str,
+    target_pixel_size: float | None = None,
+    resampling: str = METHOD_BILINEAR,
+    nodata: float | None = None,
+) -> Layer:
+    """Перепроецирует слой в другую CRS.
+
+    В отличие от resample_layer (только одна CRS), эта функция меняет
+    систему координат. Используется на границе: слои для модели живут
+    в internal CRS (метры), а для экспорта векторов/сабмита нужен
+    EPSG:3857 по регламенту хакатона.
+
+    Целевая сетка строится по bounds перепроецированного слоя с сохранением
+    pixel_size (или target_pixel_size, если задан). Extent расширяется
+    до целого числа пикселей.
+
+    Args:
+        layer: исходный слой.
+        target_crs: целевая CRS (например, "EPSG:3857").
+        target_pixel_size: размер пикселя в целевой CRS. Если None —
+            берётся layer.grid.pixel_size. Для 3857 метры не равны
+            метрам на местности, но для сохранения детализации это ок.
+        resampling: метод ресэмплинга.
+        nodata: значение nodata в результате. Если None — layer.nodata.
+
+    Returns:
+        Layer в target_crs.
+
+    Raises:
+        ValueError: если resampling неизвестен или target_crs некорректен.
+    """
+    if resampling not in SUPPORTED_METHODS:
+        raise ValueError(f"Метод '{resampling}' не поддерживается. Доступны: {SUPPORTED_METHODS}")
+
+    if layer.grid.crs == target_crs:
+        logger.debug("Слой %s уже в %s, перепроецирование не нужно", layer.name, target_crs)
+        return layer
+
+    dst_pixel_size = target_pixel_size if target_pixel_size is not None else layer.grid.pixel_size
+    dst_nodata = nodata if nodata is not None else layer.nodata
+
+    # Перепроецируем bounds в target_crs, чтобы построить целевую сетку.
+    from pyproj import Transformer
+
+    transformer = Transformer.from_crs(layer.grid.crs, target_crs, always_xy=True)
+    x_min_src, y_min_src, x_max_src, y_max_src = layer.grid.bounds
+    # Углы bounds.
+    corners_x = [x_min_src, x_min_src, x_max_src, x_max_src]
+    corners_y = [y_min_src, y_max_src, y_min_src, y_max_src]
+    xs_t, ys_t = transformer.transform(corners_x, corners_y)
+    x_min_t = float(min(xs_t))
+    y_min_t = float(min(ys_t))
+    x_max_t = float(max(xs_t))
+    y_max_t = float(max(ys_t))
+
+    width = int(np.ceil((x_max_t - x_min_t) / dst_pixel_size))
+    height = int(np.ceil((y_max_t - y_min_t) / dst_pixel_size))
+
+    target_grid = Grid(
+        crs=target_crs,
+        pixel_size=dst_pixel_size,
+        x_min=x_min_t,
+        y_min=y_min_t,
+        width=width,
+        height=height,
+    )
+
+    # Источник — в north-up (rasterio), потому что reproject ожидает
+    # трансформацию в конвенции файла.
+    src_transform = grid_to_affine(layer.grid)
+    src_crs = CRS.from_user_input(layer.grid.crs)
+    dst_transform = grid_to_affine(target_grid)
+    dst_crs = CRS.from_user_input(target_crs)
+
+    destination = np.full(target_grid.shape, dst_nodata, dtype=np.float32)
+    reproject(
+        source=np.ascontiguousarray(np.flipud(layer.data)),
+        destination=destination,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        src_nodata=layer.nodata,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        dst_nodata=dst_nodata,
+        resampling=_METHOD_MAP[resampling],
+    )
+    destination = np.ascontiguousarray(np.flipud(destination))
+
+    logger.info(
+        "Перепроецирован %s: %s -> %s (%dx%d)",
+        layer.name,
+        layer.grid.crs,
+        target_crs,
+        target_grid.width,
+        target_grid.height,
+    )
+
+    return Layer(
+        name=layer.name,
+        data=destination,
+        grid=target_grid,
+        nodata=dst_nodata,
+        source=layer.source,
+        license=layer.license,
+        unit=layer.unit,
+    )
+
+
+def reproject_layers_to_crs(
+    layers: dict[str, Layer],
+    target_crs: str,
+    target_pixel_size: float | None = None,
+    methods: dict[str, str] | None = None,
+    default_method: str = METHOD_BILINEAR,
+) -> dict[str, Layer]:
+    """Перепроецирует несколько слоёв в одну CRS.
+
+    Все слои приводятся к одной сетке (первый слой задаёт bounds,
+    остальные ресэмплятся в неё). Это нужно для экспорта: после
+    перепроецирования разные слои могут получить немного разные bounds
+    из-за округления — приводим к общему.
+
+    Args:
+        layers: словарь имя -> Layer.
+        target_crs: целевая CRS.
+        target_pixel_size: размер пикселя в целевой CRS.
+        methods: методы ресэмплинга по имени слоя.
+        default_method: метод по умолчанию.
+
+    Returns:
+        Словарь имя -> Layer в target_crs и общей сетке.
+
+    Raises:
+        ValueError: если layers пуст.
+    """
+    if not layers:
+        raise ValueError("Нет слоёв для перепроецирования")
+
+    methods = methods or {}
+
+    # Первый слой задаёт целевую сетку.
+    first_name = next(iter(layers))
+    first = reproject_layer_to_crs(
+        layer=layers[first_name],
+        target_crs=target_crs,
+        target_pixel_size=target_pixel_size,
+        resampling=methods.get(first_name, default_method),
+    )
+    target_grid = first.grid
+    result: dict[str, Layer] = {first_name: first}
+
+    for name, layer in layers.items():
+        if name == first_name:
+            continue
+        reprojected = reproject_layer_to_crs(
+            layer=layer,
+            target_crs=target_crs,
+            target_pixel_size=target_pixel_size,
+            resampling=methods.get(name, default_method),
+        )
+        result[name] = resample_layer(
+            layer=reprojected,
+            target_grid=target_grid,
+            method=methods.get(name, default_method),
+        )
+
+    logger.info("Перепроецировано слоёв: %d -> %s", len(result), target_crs)
+    return result

@@ -29,7 +29,8 @@ make test
 |-------------|-------------|------------------------------------------------|
 | data        | Data/Geo    | чтение LAS/LAZ, GeoTIFF, кэш слоёв             |
 | features    | Data/Geo    | контракты, фильтр земли, DTM, рельеф,          |
-|             |             | признаки из облака, выравнивание               |
+|             |             | признаки из облака, спектральные индексы,      |
+|             |             | выравнивание, универсальный build_site         |
 | models      | Model       | модели по источникам (U-Net, stub)             |
 | fusion      | Fusion      | комплексирование (сшивка, фьюжн)               |
 | evaluation  | Validation  | метрики, валидация, сабмит                     |
@@ -61,7 +62,7 @@ docs/
   issues/             задачи по ролям
 scripts/              CLI-скрипты
 src/expds/            основной пакет
-tests/                pytest (300+ тестов)
+tests/                pytest (295+ тестов)
 inference/            entrypoint для платформы
 
 
@@ -70,16 +71,17 @@ inference/            entrypoint для платформы
 ================================================================================
 
 Стек 1 (baseline): лидар → DTM → производные рельефа → модель → полигоны.
-Стек 2 (модальные эксперты + фьюжн): добавляются оптика и геофизика.
+Стек 2 (модальные эксперты + фьюжн): добавляются оптика, геофизика.
+Стек 3 (фьюжн): объединение экспертов.
 
 Полный пайплайн (от сырья до предсказания):
 
-  LAS/LAZ ──[io/las.py]──> точки (X, Y, Z, intensity, return_number,
-                            classification) в internal_crs
+  LAS/LAZ ──[data/las.py]──> точки (X, Y, Z, intensity, return_number,
+                              classification) в internal_crs
        │
        ├──[features/ground.py]──> фильтр земли (preset: soft/strict)
        │
-       ├──[features/dtm.py]──> DTM (mean/min/median + IDW)
+       ├──[features/dtm.py]──> DTM (mean/min/median + IDW) + hole_mask + count
        │
        ├──[features/relief.py]──> 15 производных: slope, aspect,
        │                          hillshade (4 азимута), SLRM (3 σ),
@@ -91,17 +93,37 @@ inference/            entrypoint для платформы
        │                                  std_intensity, non_first_return_ratio,
        │                                  mean_return_number, mean_z, z_std
        │
-       └──[scripts/build_layers.py]──> layers/*.tif + samples/sample.npz
+       └──[features/build_site.py]──> layers/*.tif + samples/sample.npz
+
+Растровые модальности (оптика, геофизика) идут в тот же build_site:
+
+  GeoTIFF (or/sp_or/ae/maggr/etgr/terfl)
+       │
+       ├──[features/align.py]──> ресэмплинг в общую сетку (лидар задаёт сетку,
+       │                          если есть; иначе — первый растр по priority)
+       │
+       ├──[features/spectral.py]──> NDVI, SR, ARI, GNDVI, NDWI
+       │                            (только если есть NIR/Red;
+       │                            иначе graceful skip, channel_mask=False)
+       │
+       └──[features/build_site.py]──> слои с префиксом модальности
+                                      (or_*, sp_or_*, maggr_*, ...)
+
+Спектральные индексы (статья, п.1):
+  NDVI = (NIR - Red) / (NIR + Red)   — здоровье растительности
+  SR   = NIR / Red                    — биомасса
+  ARI  = (1/Green) - (1/Red)          — антоцианы (стресс растений)
+  GNDVI, NDWI                         — аналоги для зелёного/воды
 
 
 ================================================================================
 РЕЗУЛЬТАТ ДЛЯ РОЛИ 2 (MODEL)
 ================================================================================
 
-После прогона build_layers в data/cache/<site>/ появляются:
+После прогона build_layers / build_site в data/cache/<site>/ появляются:
 
 layers/*.tif
-    26 отдельных GeoTIFF (для отладки, QGIS, визуального контроля).
+    Отдельные GeoTIFF (для отладки, QGIS, визуального контроля).
     CRS = internal, nodata = -9999, float32.
 
 samples/sample.npz + sample_meta.json
@@ -116,6 +138,9 @@ samples/sample.npz + sample_meta.json
       3. Cloud features по алфавиту: mean_intensity,
          mean_return_number, mean_z, non_first_return_ratio,
          point_density, std_intensity, z_std.
+      4. Остальное по алфавиту: hole_mask, count, rgb_r/g/b, mag,
+         or_*, sp_or_*, ae_*, maggr_*, etgr_*, terfl_*,
+         *_ndvi, *_sr, *_ari, *_gndvi, *_ndwi.
 
     Точный список — в sample_meta.json, поле channel_names.
 
@@ -126,11 +151,16 @@ samples/sample.npz + sample_meta.json
         data = np.load("data/cache/<site>/samples/sample.npz")
         tensor = data["tensor"]              # [C, H, W] float32
         channel_mask = data["channel_mask"]  # [C] bool
+        valid_mask = data["valid_mask"]      # [H, W] bool (новое)
 
     Соглашение о значениях:
         nodata заменён на 0 (через stack_layers).
         Валидные значения — как есть.
-        channel_mask — все True в стеке 1.
+        valid_mask — попиксельная валидность: True, если хоть один
+        канал в пикселе валиден. Модель не должна учиться на
+        выдуманных нулях в дырах DTM.
+        channel_mask — какие каналы реально присутствуют. В стеке 1
+        все True; для отсутствующих модальностей False.
 
 
 ================================================================================
@@ -142,17 +172,20 @@ samples/sample.npz + sample_meta.json
     uv run python scripts/process_sites.py --data-dir data/raw
 
 Скрипт:
-  - находит все папки с UTM.json (участки);
-  - для каждого определяет CRS (LAS header или UTM.json);
-  - генерирует конфиг в памяти (без файла на диске);
-  - запускает полный пайплайн;
+  - находит все папки-участки (UTM.json / LAS / GeoTIFF в подпапках
+    с кодом модальности);
+  - для каждого определяет CRS (LAS header > UTM.json > config);
+  - генерирует конфиг в памяти;
+  - запускает build_site (лидар + растры + спектральные индексы);
   - сохраняет layers/ + samples/ в data/cache/<name>/;
   - печатает отчёт: сколько успешно, сколько упало.
 
 Опции:
-  --only 006 017 035    обработать только эти участки
-  --skip 048            пропустить эти участки
-  --pixel-size 1.0      размер пикселя (по умолчанию 1.0 м)
+  --only 006 017 035       обработать только эти участки
+  --skip 048               пропустить эти участки
+  --pixel-size 1.0         размер пикселя (по умолчанию 1.0 м)
+  --output-crs EPSG:3857   перепроецировать слои в 3857 (по регламенту
+                           для векторов; для модели обычно не нужно)
 
 Обработать один участок вручную:
 
@@ -164,12 +197,15 @@ samples/sample.npz + sample_meta.json
         --site data/raw/013_Нора_Виннон/013_Нора_Виннон \
         --out configs/dataset_013.yaml
 
-Для растровых участков (без лидара):
+Для растровых участков (без лидара) старый путь:
 
     uv run python scripts/prepare_raster_site.py \
         --site data/raw/048_Kalmykia \
         --out data/cache/048_Kalmykia \
         --pixel-size 1.0
+
+Новый путь (рекомендуется): process_sites.py с build_site.
+prepare_raster_site.py оставлен для обратной совместимости.
 
 
 ================================================================================
@@ -249,9 +285,11 @@ main      ← develop ← feature/<модуль>-<задача>
 
 Текущие:
   develop                          основная интеграция
-  feature/data-config-generator    PR #19 (генератор конфигов, техдолг,
+  feature/data-technical-debt      PR #19 (генератор конфигов, техдолг,
                                    инвентаризация LAS, фикс relief nodata,
-                                   полигоны в аудите, пакетная обработка)
+                                   полигоны в аудите, пакетная обработка,
+                                   спектральные индексы, build_site,
+                                   valid_mask в Sample, EPSG:3857)
   feature/models-baseline          baseline-модель
   feature/skeleton                 костяк пайплайна (смержен)
 
@@ -261,7 +299,7 @@ main      ← develop ← feature/<модуль>-<задача>
 ================================================================================
 
 make lint     # ruff check + ruff format --check
-make test     # pytest (~300 тестов)
+make test     # pytest (~295 тестов)
 
 Правила стиля:
   - строка ≤ 100 символов;
@@ -275,7 +313,8 @@ make test     # pytest (~300 тестов)
 ДОКУМЕНТАЦИЯ
 ================================================================================
 
-docs/CONTRACTS.md    контракты данных (Grid, Layer, Sample, DataSpec)
+docs/CONTRACTS.md    контракты данных (Grid, Layer, Sample, DataSpec,
+                     valid_mask, спектральные индексы, CRS)
 docs/SKELETON.md     схема пайплайна, API модулей, встроенные проверки
 docs/REPO_SETUP.md   правила работы с репозиторием
 docs/issues/         задачи по ролям (Model, Post/Vector, Data/Geo,

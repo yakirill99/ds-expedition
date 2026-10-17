@@ -15,16 +15,15 @@
 
 ### GeoTIFF ↔ Grid (raster.py)
 
-- `_build_transform(grid)` = `Affine(ps, 0, x_min, 0, -ps, y_max)` — north-up, row 0 файла = **верх** (y_max).
+- `grid_to_affine(grid)` = `Affine(ps, 0, x_min, 0, -ps, y_max)` — north-up, row 0 файла = **верх** (y_max).
 - `_build_grid_from_raster(transform)`: `y_min = y_max - height * ps`.
-- Флипа массива (`flipud`, `[::-1]`) в raster.py нет.
+- `read_raster`/`write_raster` делают `flipud` на границе: в памяти всегда конвенция Grid (row 0 = юг), на диске — north-up. South-up tif → ValueError.
 - `read_raster(path, grid)` — чтение с ресэмплингом в grid при несовпадении.
-- `write_raster(...)` — пишет `layer.data` с transform из `_build_transform`.
+- `write_raster(...)` — пишет `layer.data` с transform из `grid_to_affine`.
 
-**⚠ Баг ориентации Y подтверждён и исправлен** (PR `fix/raster-y-orientation`):
+**⚠ Баг ориентации Y исправлен** (PR `fix/raster-y-orientation`):
 `flipud` на границе в `write_raster`/`read_raster` и вокруг `reproject` в `align.py`;
-`relief.py`: `arctan2(-gx, -gy)`. В памяти всегда конвенция Grid (row 0 = юг),
-на диске — north-up. South-up tif → ValueError. Кэш до фикса пересобрать.
+`relief.py`: `arctan2(-gx, -gy)`. Кэш до фикса пересобрать.
 
 ## 2. Layer, DataSpec, Sample, stack_layers
 
@@ -32,17 +31,22 @@
   `valid_mask = data != nodata`. dtype строго float32, shape строго = grid.shape.
 - `DataSpec(grid, channel_names, nodata, metadata)`: имена уникальны,
   `channel_index(name)`. Порядок каналов = контракт модели.
-- `Sample(tensor[C,H,W], channel_names, channel_mask[C], grid, target[H,W] | None)`.
-- `stack_layers(layers, spec) -> Sample`:
-  - nodata → 0;
+- `Sample(tensor[C,H,W], channel_names, channel_mask[C], grid, target[H,W] | None,
+  valid_mask[H,W] | None)`:
+  - `valid_mask` — попиксельная валидность (True там, где хотя бы один
+    присутствующий канал валиден). `None` — маска не запрошена
+    (обратная совместимость).
+- `stack_layers(layers, spec, compute_valid_mask=True) -> Sample`:
+  - nodata → 0 в `tensor`;
   - `channel_mask` — наличие канала целиком, не попиксельно;
+  - `valid_mask` — попиксельно: `True`, если хоть один канал в пикселе валиден;
   - отсутствующий канал → нули + mask False; лишние слои → warning, игнор;
   - слой с другим Grid → ValueError (сначала `align`).
 
 ### Решения костяка поверх контракта
 
-- Попиксельная валидность теряется в `stack_layers` → valid-маску берём из
-  `Layer("dtm").valid_mask` до стака и храним отдельно.
+- `Sample.valid_mask` — новое поле, критично для U-Net/сегментации:
+  модель не должна учиться на выдуманных нулях в дырах DTM.
 - `Sample.target` (`[H,W]`) костяк не использует: таргеты `(K,H,W)` —
   `y_seg` и `y_hm` — идут отдельно в `KozDataset`. `target=None`.
 
@@ -55,27 +59,18 @@
 
 | Группа | Имена |
 |---|---|
-| dtm | `dtm` (+ `hole_mask`, `count` из dtm.py — входят ли в 19, проверить) |
+| dtm | `dtm` |
 | рельеф | `slope`, `aspect`, `hillshade_az_{int(az)}`, `slrm_sigma_{sigma}`, `positive_openness`, `negative_openness`, `sky_view_factor`, `curvature_sigma_{sigma}`, `tpi_radius_{r}`, `tri_radius_{r}` |
 | cloud | `point_density`, `mean_intensity`, `std_intensity`, `non_first_return_ratio`, `mean_return_number`, `mean_z`, `z_std` |
+| остальное | `hole_mask`, `count` (служебные), `rgb_r`, `rgb_g`, `rgb_b`, `mag` (синтетика), `or_*`, `sp_or_*`, `ae_*`, `maggr_*`, `etgr_*`, `terfl_*` (растры), спектральные индексы `*_ndvi`, `*_sr`, `*_ari`, `*_gndvi`, `*_ndwi` |
 
-Ожидаемый порядок для raleigh (σ — float → `8.0`, `2.0`; строковая сортировка → `135` < `45`):
-
-```
-dtm,
-aspect, curvature_sigma_2.0, hillshade_az_135, hillshade_az_45,
-negative_openness, positive_openness, sky_view_factor, slope,
-slrm_sigma_8.0, tpi_radius_5, tri_radius_3,
-mean_intensity, mean_return_number, mean_z, non_first_return_ratio,
-point_density, std_intensity, z_std
-```
-
-Итого 19 при условии, что openness/SVF есть, а `hole_mask`/`count` в sample не входят.
-Подтвердить по `sample_meta.json` после первого реального прогона.
+`hole_mask` и `count` **не выделяются** — идут в «остальное» по алфавиту.
+Это сохраняет контракт с ролью 5 (порядок каналов в синтетике не меняется).
 
 Следствия:
-- набор каналов зависит от конфига (азимуты, σ, радиусы) → `channel_names`
-  сохраняются в чекпойнт, на инференсе сверяются с DataSpec, при расхождении — ошибка;
+- набор каналов зависит от конфига (азимуты, σ, радиусы, модальности) →
+  `channel_names` сохраняются в чекпойнт, на инференсе сверяются с DataSpec,
+  при расхождении — ошибка;
 - каналы костяка для других модальностей: `rgb_r`, `rgb_g`, `rgb_b`, `mag`
   (Layer строго 2D) — попадают в группу «остальное», в конец по алфавиту.
 
@@ -86,17 +81,22 @@ point_density, std_intensity, z_std
   Имена файлов кэша для костяка не контракт; читать слои через `LayerCache` или
   `sample.npz`, не по glob `*.tif`.
 - `data/cache/samples/sample.npz`: ключи `tensor` (`[C,H,W]` float32),
-  `channel_mask` (`[C]` bool). Сжатый (`savez_compressed`).
+  `channel_mask` (`[C]` bool), `valid_mask` (`[H,W]` bool — новое, если
+  строился через `_save_sample`/`_save_site`). Сжатый (`savez_compressed`).
+  Старый код, читающий только `tensor`/`channel_mask`, продолжает работать.
 - `data/cache/samples/sample_meta.json`: `channel_names`, `channel_mask`,
   `grid` {crs, pixel_size, x_min, y_min, width, height}, `nodata`,
-  `n_channels`, `n_available_channels`.
+  `n_channels`, `n_available_channels`, `has_valid_mask`.
 - Grid восстанавливается как `Grid(**meta["grid"])`.
 
 ## 5. CRS
 
 - `crs.source` — CRS исходника (CRS из LAS приоритетнее конфига).
 - `crs.internal` — метрическая CRS: Grid, все слои, все расчёты (raleigh: EPSG:32617).
-- `crs.output` — EPSG:3857: вход разметки и выход GeoJSON, перепроекция только на границе.
+- `crs.output` — EPSG:3857: вход разметки и выход GeoJSON, перепроекция только
+  на границе (`align.reproject_layer_to_crs` / `reproject_layers_to_crs`,
+  флаг `--output-crs` в скриптах). По умолчанию слои остаются в internal
+  (модель работает в метрах).
 - Метрика считается в EPSG:3857. `r_tol` задаётся в единицах 3857
   (≠ метры: 1 м на местности ≈ 1/cos φ единиц 3857).
 - TODO из регламента: значение R_tolerance и его единицы, критерий матчинга
@@ -104,18 +104,35 @@ point_density, std_intensity, z_std
 
 ## 6. Конфиг
 
-- `load_config(path) -> AppConfig`, все секции обязательны:
+- `load_config(path) -> AppConfig`, обязательные секции:
   dataset, lidar, crs, grid, ground, dtm, relief, cloud_features, align, logging.
+- Опциональные секции (обратная совместимость): `spectral`, `modalities`,
+  `output_crs`. Если их нет — берутся дефолты в `config.py`.
 - `dataset.lidar_file` обязателен → в конфигах без LAS (синтетика) — заглушка.
 - Лишние секции игнорируются → секции костяка (`targets`, `tiles`, `post`, `eval`)
   читает отдельный загрузчик костяка; `config.py` не трогаем.
 - `setup_logging(cfg.logging)` — консоль + файл.
 
+### Секции для мультимодальности и спектральных индексов
+
+- `modalities.enabled` — какие модальности обрабатывать (li, or, sp_or, ae,
+  maggr, etgr, terfl).
+- `modalities.priority` — порядок для выбора целевой сетки, если лидара нет.
+- `spectral.enabled` — какие индексы строить (ndvi, sr, ari, gndvi, ndwi).
+- `spectral.red_channel` / `nir_channel` / `green_channel` / `blue_channel` —
+  0-based индексы каналов в снимке. `None` → индекс не строится (graceful skip).
+- `output_crs.enabled` / `output_crs.epsg` — экспорт в EPSG:3857 (по умолчанию
+  выкл; включается флагом `--output-crs`).
+
 ## 7. Проверки, закрывающие открытые вопросы
 
 - Ориентация Y: закрыто, регрессионные тесты `tests/test_*_orientation.py`.
-  строки 0 с `Grid.transform_to_world(0, 0)`.
-- Точный список 19 каналов: `sample_meta.json` после прогона `build_layers.py`.
+- `valid_mask` в Sample: закрыто, `tests/test_spectral.py`, `test_grid.py`.
+- Спектральные индексы: закрыто, `tests/test_spectral.py` (20+ тестов).
+- Универсальный адаптер `build_site`: закрыто, `src/expds/features/build_site.py`,
+  `scripts/build_layers.py` и `scripts/process_sites.py` на нём.
+- Точный список каналов: `sample_meta.json` после прогона `build_layers.py`
+  или `process_sites.py`.
 - Регламент: R_tolerance, IoU-порог, классы.
 
 ## Костяк

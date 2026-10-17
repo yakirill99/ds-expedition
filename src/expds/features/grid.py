@@ -253,6 +253,13 @@ class Sample:
     tensor — [C, H, W] float32. channel_names — имена каналов в том же
     порядке. channel_mask — [C] bool: какие каналы реально есть (для
     отсутствующих модальностей — False). target — [H, W] float32 или None.
+    valid_mask — [H, W] bool: попиксельная валидность (False там, где
+    во ВСЕХ каналах был nodata). Для U-Net/сегментации: модель не должна
+    учиться на выдуманных нулях в дырах DTM.
+
+    valid_mask — опциональный (None = все пиксели валидны). Это сохраняет
+    обратную совместимость со старым кодом, который создаёт Sample
+    без маски.
     """
 
     tensor: np.ndarray
@@ -260,6 +267,7 @@ class Sample:
     channel_mask: np.ndarray
     grid: Grid
     target: np.ndarray | None = None
+    valid_mask: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         """Валидация размерностей и согласованности."""
@@ -283,6 +291,16 @@ class Sample:
             raise ValueError(
                 f"Sample: target shape {self.target.shape} не совпадает с grid {self.grid.shape}"
             )
+        if self.valid_mask is not None:
+            if self.valid_mask.shape != self.grid.shape:
+                raise ValueError(
+                    f"Sample: valid_mask shape {self.valid_mask.shape} "
+                    f"не совпадает с grid {self.grid.shape}"
+                )
+            if self.valid_mask.dtype != np.bool_:
+                raise ValueError(
+                    f"Sample: valid_mask dtype должен быть bool, получено {self.valid_mask.dtype}"
+                )
 
     @property
     def n_channels(self) -> int:
@@ -336,6 +354,7 @@ class DataSpec:
 def stack_layers(
     layers: Iterable[Layer],
     spec: DataSpec,
+    compute_valid_mask: bool = True,
 ) -> Sample:
     """Собирает Sample из набора слоёв по спецификации.
 
@@ -343,12 +362,21 @@ def stack_layers(
     из spec нет в layers — он заполняется нулями, а в channel_mask
     ставится False. Лишние слои (не из spec) игнорируются с warning.
 
+    valid_mask: попиксельная валидность. True там, где хотя бы один
+    из присутствующих каналов валиден. False там, где все каналы
+    nodata. Это важно для U-Net: модель не должна учиться на нулях,
+    которыми заменён nodata в дырах DTM.
+
     Args:
         layers: итерируемое по Layer.
         spec: DataSpec с ожидаемым порядком каналов.
+        compute_valid_mask: если True — собирать valid_mask. Если False —
+            Sample.valid_mask=None (для обратной совместимости с кодом,
+            которому маска не нужна).
 
     Returns:
-        Sample с тензором [C, H, W], именами каналов, маской и target=None.
+        Sample с тензором [C, H, W], именами каналов, маской каналов,
+        valid_mask и target=None.
     """
     layers_by_name = {layer.name: layer for layer in layers}
     n_channels = len(spec.channel_names)
@@ -356,6 +384,8 @@ def stack_layers(
 
     tensor = np.zeros((n_channels, height, width), dtype=np.float32)
     channel_mask = np.zeros((n_channels,), dtype=bool)
+    # valid_mask: True там, где хотя бы один канал валиден.
+    valid_mask = np.zeros((height, width), dtype=bool)
 
     for idx, name in enumerate(spec.channel_names):
         layer = layers_by_name.get(name)
@@ -374,17 +404,24 @@ def stack_layers(
         data[~layer.valid_mask] = 0.0
         tensor[idx] = data
         channel_mask[idx] = True
+        valid_mask |= layer.valid_mask
 
     extra = set(layers_by_name) - set(spec.channel_names)
     if extra:
         logger.warning("Лишние слои не из spec, игнорируем: %s", sorted(extra))
 
+    # Если валидных каналов нет — valid_mask бессмысленна, ставим None.
+    final_valid_mask: np.ndarray | None = None
+    if compute_valid_mask and channel_mask.any():
+        final_valid_mask = valid_mask
+
     logger.info(
-        "Sample собран: C=%d, доступно=%d, shape=%dx%d",
+        "Sample собран: C=%d, доступно=%d, shape=%dx%d, valid=%.1f%%",
         n_channels,
         int(channel_mask.sum()),
         height,
         width,
+        100.0 * float(valid_mask.mean()) if final_valid_mask is not None else 100.0,
     )
 
     return Sample(
@@ -392,4 +429,5 @@ def stack_layers(
         channel_names=spec.channel_names,
         channel_mask=channel_mask,
         grid=spec.grid,
+        valid_mask=final_valid_mask,
     )
