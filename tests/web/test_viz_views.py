@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from django.test import Client
 from django.urls import reverse
@@ -66,3 +69,53 @@ def test_tile_serve_404_for_missing_tile(client: Client) -> None:
     """Запрос несуществующего тайла возвращает 404."""
     response = client.get("/viz/tiles/missing/layer/0/0/0.png")
     assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_geojson_serve_reprojects_to_wgs84(client: Client, settings, tmp_path: Path) -> None:
+    """GeoJSON endpoint перепроецирует координаты из CRS локации в WGS84."""
+    settings.MAP_STORAGE_ROOT = tmp_path
+    settings.MAP_TILE_URL_PREFIX = "/viz/tiles/"
+
+    location = Location.objects.create(
+        name="Тест",
+        slug="test-geojson",
+        center_lat=55.0,
+        center_lon=37.0,
+        zoom=10,
+    )
+    filename = "test.geojson"
+    MapLayer.objects.create(
+        location=location,
+        name="Разметка",
+        slug="annotation_1",
+        layer_type="geojson",
+        geojson_url=f"/viz/geojson/{location.slug}/{filename}",
+    )
+
+    location_dir = tmp_path / location.slug
+    location_dir.mkdir()
+    (location_dir / "manifest.json").write_text(json.dumps({"crs": "EPSG:3857"}), encoding="utf-8")
+
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [3540420.0, 7316830.0],
+                },
+                "properties": {"id": 1},
+            }
+        ],
+    }
+    (location_dir / filename).write_text(json.dumps(geojson), encoding="utf-8")
+
+    response = client.get(reverse("viz-geojson", args=[location.slug, filename]))
+    assert response.status_code == 200
+    data = response.json()
+    coords = data["features"][0]["geometry"]["coordinates"]
+    # Примерно Смоленская область
+    assert 30 < coords[0] < 35
+    assert 54 < coords[1] < 56

@@ -20,13 +20,8 @@ def _load_manifest(location_dir: Path) -> dict:
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def _discover_layers(location_dir: Path) -> list[str]:
-    """Найти папки слоёв тайлов внутри локации.
-
-    Поддерживаются две структуры:
-        <location_dir>/<layer>/{z}/{x}/{y}.png
-        <location_dir>/tiles/<layer>/{z}/{x}/{y}.png
-    """
+def _discover_tile_layers(location_dir: Path) -> list[str]:
+    """Найти папки слоёв тайлов внутри локации."""
     tiles_dir = location_dir / "tiles"
     search_root = tiles_dir if tiles_dir.is_dir() else location_dir
     return sorted(
@@ -36,25 +31,40 @@ def _discover_layers(location_dir: Path) -> list[str]:
     )
 
 
+def _discover_geojson_layers(location_dir: Path) -> list[tuple[str, str]]:
+    """Найти GeoJSON-файлы разметки в корне папки локации.
+
+    Возвращает список пар (layer_slug, filename).
+    """
+    files = sorted(
+        item
+        for item in location_dir.iterdir()
+        if item.is_file() and item.suffix.lower() == ".geojson"
+    )
+    layers = []
+    for f in files:
+        base = f.stem
+        # Для файлов вида annotation_...geojson убираем префикс
+        layer_slug = slugify(base) or "annotation"
+        layers.append((layer_slug, f.name))
+    return layers
+
+
 class Command(BaseCommand):
     """Создать или обновить локацию по локальной папке с тайлами.
 
-    Ожидаемая структура исходных данных (любой из вариантов):
+    Ожидаемая структура исходных данных:
 
-        <tiles-dir>/<slug>/<layer>/<z>/<x>/<y>.<ext>
-        <tiles-dir>/<slug>/tiles/<layer>/<z>/<x>/<y>.<ext>
+        <tiles-dir>/<slug>/<layer>/{z}/{x}/{y}.png
+        <tiles-dir>/<slug>/annotation_<name>.geojson
 
     Если в папке локации есть ``manifest.json``, название, центр и зум
     берутся оттуда. Иначе их нужно передать явно через аргументы.
 
     Пример:
         python web/manage.py import_location \\
-            --tiles-dir data \\
+            --tiles-dir web/tiles \\
             --slug 001-gnezdovo-nivlenskoe
-
-        python web/manage.py import_location \\
-            --name "Участок 1" --slug uchastok-1 \\
-            --tiles-dir data/tiles --lat 55.75 --lon 37.61 --zoom 14
     """
 
     help = "Импортировать локацию с тайлами из локальной папки в хранилище карт"
@@ -74,7 +84,7 @@ class Command(BaseCommand):
             "--layer-type",
             default="other",
             choices=[choice for choice, _ in MapLayer.LAYER_TYPES],
-            help="Тип слоя по умолчанию для всех импортируемых слоёв",
+            help="Тип слоя по умолчанию для растровых слоёв",
         )
         parser.add_argument(
             "--dry-run", action="store_true", help="Только показать, что будет импортировано"
@@ -87,7 +97,6 @@ class Command(BaseCommand):
         # Определяем slug: аргумент > manifest > ошибка.
         slug = options["slug"]
         if slug is None:
-            # Пытаемся угадать slug, если в корне одна папка локации.
             location_dirs = [item for item in tiles_dir.iterdir() if item.is_dir()]
             if len(location_dirs) == 1:
                 slug = location_dirs[0].name
@@ -118,18 +127,22 @@ class Command(BaseCommand):
         if not location_dir.is_dir():
             raise CommandError(f"Не найдена папка локации: {location_dir}")
 
-        layer_slugs = _discover_layers(location_dir)
-        if not layer_slugs:
-            raise CommandError(f"В папке {location_dir} не найдено слоёв с тайлами")
+        tile_layer_slugs = _discover_tile_layers(location_dir)
+        geojson_layers = _discover_geojson_layers(location_dir)
+
+        if not tile_layer_slugs and not geojson_layers:
+            raise CommandError(f"В папке {location_dir} не найдено слоёв")
 
         if options["dry_run"]:
             self.stdout.write(f"Будет импортирована локация '{name}' ({slug}):")
-            for layer_slug in layer_slugs:
+            for layer_slug in tile_layer_slugs:
                 search_root = (
                     (location_dir / "tiles") if (location_dir / "tiles").is_dir() else location_dir
                 )
                 tiles = sum(1 for _ in (search_root / layer_slug).rglob("*.png"))
                 self.stdout.write(f"  - слой {layer_slug}: {tiles} тайлов")
+            for layer_slug, filename in geojson_layers:
+                self.stdout.write(f"  - векторный слой {layer_slug}: {filename}")
             return
 
         location, created = Location.objects.update_or_create(
@@ -145,7 +158,8 @@ class Command(BaseCommand):
             self.style.SUCCESS(f"Локация {'создана' if created else 'обновлена'}: {location}")
         )
 
-        for order, layer_slug in enumerate(layer_slugs):
+        order = 0
+        for layer_slug in tile_layer_slugs:
             MapLayer.objects.update_or_create(
                 location=location,
                 slug=layer_slug,
@@ -153,7 +167,27 @@ class Command(BaseCommand):
                     "name": layer_slug.replace("_", " ").capitalize(),
                     "layer_type": options["layer_type"],
                     "order": order,
+                    "geojson_url": "",
                 },
             )
             sample = TilePath(location_slug=slug, layer_slug=layer_slug, z=0, x=0, y=0)
             self.stdout.write(f"  - слой {layer_slug} -> {storage.tile_url(sample)}...")
+            order += 1
+
+        for idx, (_, filename) in enumerate(geojson_layers, start=1):
+            layer_slug = f"annotation_{idx}"
+            name = filename.replace("annotation_", "").replace(".geojson", "").replace("_", " ")
+            MapLayer.objects.update_or_create(
+                location=location,
+                slug=layer_slug,
+                defaults={
+                    "name": name,
+                    "layer_type": "geojson",
+                    "order": order,
+                    "geojson_url": f"/viz/geojson/{slug}/{filename}",
+                },
+            )
+            self.stdout.write(
+                f"  - векторный слой {layer_slug} ({name}) -> /viz/geojson/{slug}/{filename}"
+            )
+            order += 1

@@ -137,14 +137,38 @@
                 }
 
                 data.layers.forEach(layer => {
-                    const tileLayer = L.tileLayer(layer.tile_url_template, {
-                        attribution: layer.name,
-                        maxZoom: 22,
-                        minZoom: 1
-                    });
-                    currentLayers[layer.slug] = tileLayer;
+                    const isGeoJson = layer.type === 'geojson';
+                    let mapLayer;
+
+                    if (isGeoJson) {
+                        mapLayer = L.geoJSON(null, {
+                            style: {
+                                color: '#ff7800',
+                                weight: 2,
+                                opacity: 0.85,
+                                fillOpacity: 0.2,
+                            },
+                            pointToLayer: (feature, latlng) =>
+                                L.circleMarker(latlng, { radius: 6, color: '#ff7800' }),
+                        });
+                        fetch(layer.geojson_url)
+                            .then(r => {
+                                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                                return r.json();
+                            })
+                            .then(geojson => mapLayer.addData(geojson))
+                            .catch(err => showError(`Ошибка загрузки ${layer.name}: ${err.message}`));
+                    } else {
+                        mapLayer = L.tileLayer(layer.tile_url_template, {
+                            attribution: layer.name,
+                            maxZoom: 22,
+                            minZoom: 1
+                        });
+                    }
+
+                    currentLayers[layer.slug] = mapLayer;
                     if (layer.is_visible) {
-                        tileLayer.addTo(map);
+                        mapLayer.addTo(map);
                     }
 
                     const div = document.createElement('div');
@@ -156,9 +180,9 @@
                     checkbox.id = `layer-${layer.slug}`;
                     checkbox.addEventListener('change', () => {
                         if (checkbox.checked) {
-                            tileLayer.addTo(map);
+                            mapLayer.addTo(map);
                         } else {
-                            map.removeLayer(tileLayer);
+                            map.removeLayer(mapLayer);
                         }
                     });
 

@@ -17,4 +17,9 @@ urlpatterns = [
         views.tile_serve,
         name="viz-tile",
     ),
+    path(
+        "geojson/<slug:location_slug>/<path:filename>",
+        views.geojson_serve,
+        name="viz-geojson",
+    ),
 ]

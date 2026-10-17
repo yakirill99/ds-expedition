@@ -34,6 +34,7 @@ class MapLayer(models.Model):
         ("satellite", "Спутниковый снимок"),
         ("lidar", "Карта высот (LiDAR)"),
         ("aerial", "Аэрофотосъёмка"),
+        ("geojson", "Векторная разметка"),
         ("other", "Другое"),
     ]
 
@@ -50,6 +51,9 @@ class MapLayer(models.Model):
     # Порядок отображения в переключателе слоёв
     order = models.PositiveSmallIntegerField("Порядок", default=0)
     is_visible = models.BooleanField("Видим по умолчанию", default=True)
+
+    # Для векторных слоёв (GeoJSON)
+    geojson_url = models.CharField("URL GeoJSON", max_length=500, blank=True)
 
     created_at = models.DateTimeField("Создано", auto_now_add=True)
 

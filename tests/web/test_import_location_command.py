@@ -111,3 +111,27 @@ def test_missing_center_raises_error(location_dir: Path, tiles_root: Path) -> No
             tiles_dir=str(tiles_root),
             slug="001-gnezdovo-nivlenskoe",
         )
+
+
+@pytest.mark.django_db
+def test_import_geojson_layer(tiles_root: Path, location_dir: Path) -> None:
+    """GeoJSON-файлы в корне локации импортируются как векторные слои."""
+    location_dir.mkdir()
+    manifest = {
+        "slug": "001-gnezdovo-nivlenskoe",
+        "name": "001 Гнёздово Нивленское",
+        "center": {"lat": 54.8794, "lon": 31.9719},
+        "zoom": 14,
+    }
+    (location_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (location_dir / "satellite" / "14" / "9900").mkdir(parents=True)
+    (location_dir / "annotation_kurgans.geojson").write_text(
+        '{"type":"FeatureCollection","features":[]}', encoding="utf-8"
+    )
+
+    call_command("import_location", tiles_dir=str(tiles_root), stdout=StringIO())
+
+    location = Location.objects.get(slug="001-gnezdovo-nivlenskoe")
+    geojson_layer = location.layers.get(slug="annotation_1")
+    assert geojson_layer.layer_type == "geojson"
+    assert geojson_layer.geojson_url.endswith("annotation_kurgans.geojson")
