@@ -1,11 +1,15 @@
-"""Контракты данных КОЗ №3.
+"""Контракты данных КОЗ №3: реестр слоёв и участков.
 
-Единый источник правды для Grid / Layer / Site / Detection / DataSpec.
-Без Hydra, без pydantic — только dataclasses.
+`load_spec` читает ТОТ ЖЕ YAML, что и ``expds.pipeline_config``: масштаб тайлов
+берётся из ``tiles``, классы — из ``targets``, метрика — из ``eval``, радиус NMS —
+из ``post``. Переименований нет, поэтому значения физически не могут разойтись
+между двумя парсерами. Дополнительно читаются top-level блоки ``layers`` и
+``sites`` — их ``pipeline_config`` не смотрит.
 
-ПРАВИЛО КООРДИНАТ: работаем через ЦЕНТР пикселя.
-    x = c + (col + 0.5) * a
-    y = f - (row + 0.5) * e        (стандартный north-up transform)
+`Grid` и `Detection` здесь НЕ определяются, а берутся из канонических модулей:
+
+* ``Grid`` — :mod:`expds.features.grid` (row 0 = юг, одна конвенция на пайплайн);
+* ``Detection`` — :mod:`expds.io.geojson` (numpy-геометрия во внутреннем CRS).
 """
 
 from __future__ import annotations
@@ -16,130 +20,40 @@ from typing import Any
 
 import yaml
 
-# Допустимые группы слоёв. Выход за пределы — ошибка загрузки спеки.
-VALID_GROUPS = {"relief", "optic", "geo"}
-VALID_KINDS = {"raster", "pointcloud"}
+from expds.features.grid import Grid
+from expds.io.geojson import Detection
 
+__all__ = ["DataSpec", "Detection", "Grid", "Layer", "Site", "load_spec"]
 
-@dataclass(frozen=True)
-class Grid:
-    """Описывает общую растровую сетку (одна на сайт).
+#: Допустимые группы слоёв. Выход за пределы — ошибка загрузки спеки.
+VALID_GROUPS = frozenset({"relief", "optic", "geo"})
+#: Допустимые типы данных слоя.
+VALID_KINDS = frozenset({"raster", "pointcloud"})
 
-    transform — аффинный tuple (a, b, c, d, e, f), как в rasterio.
-    Для north-up: b = d = 0, a > 0, e < 0.
-    """
-
-    crs: str
-    transform: tuple[float, float, float, float, float, float]
-    width: int
-    height: int
-
-    @property
-    def pixel_size(self) -> float:
-        """Размер пикселя в единицах CRS (по оси X)."""
-        a = self.transform[0]
-        e = self.transform[4]
-        return float(max(abs(a), abs(e)))
-
-    @property
-    def bounds(self) -> tuple[float, float, float, float]:
-        """Границы (left, bottom, right, top) в координатах CRS."""
-        a, _b, c, _d, e, f = self.transform
-        left = c
-        top = f
-        right = c + a * self.width
-        bottom = f + e * self.height
-        # e < 0 (north-up) => bottom < top
-        return (
-            float(min(left, right)),
-            float(min(bottom, top)),
-            float(max(left, right)),
-            float(max(bottom, top)),
-        )
-
-    def pixel_to_world(self, rows: Any, cols: Any):
-        """Индексы (row, col) -> координаты ЦЕНТРА пикселя (x, y)."""
-        import numpy as np
-
-        a, _b, c, _d, e, f = self.transform
-        rows = np.asarray(rows, dtype=float)
-        cols = np.asarray(cols, dtype=float)
-        xs = c + (cols + 0.5) * a
-        ys = f + (rows + 0.5) * e
-        return xs, ys
-
-    def world_to_pixel(self, xs: Any, ys: Any):
-        """Координаты (x, y) -> индексы пикселей (rows, cols) как float."""
-        import numpy as np
-
-        a, _b, c, _d, e, f = self.transform
-        xs = np.asarray(xs, dtype=float)
-        ys = np.asarray(ys, dtype=float)
-        cols = (xs - c) / a - 0.5
-        rows = (ys - f) / e - 0.5
-        return rows, cols
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "crs": self.crs,
-            "transform": list(self.transform),
-            "width": self.width,
-            "height": self.height,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> Grid:
-        return cls(
-            crs=str(d["crs"]),
-            transform=tuple(float(v) for v in d["transform"]),  # type: ignore[arg-type]
-            width=int(d["width"]),
-            height=int(d["height"]),
-        )
+#: tile_px должен делиться на это число (согласовано с network stride).
+TILE_DIVISOR = 32
 
 
 @dataclass(frozen=True)
 class Layer:
-    """Описание одного слоя внутри сайта."""
+    """Описание одного слоя внутри участка."""
 
-    name: str  # "dtm", "hillshade", "rgb", "mag", "gpr_slice"
-    group: str  # "relief" | "optic" | "geo"
-    glob: str  # шаблон пути внутри сайта, напр. "*.tif" или "dtm.tif"
-    kind: str  # "raster" | "pointcloud"
+    name: str
+    group: str
+    glob: str
+    kind: str
     nodata: float | None = None
-    optional: bool = False  # True = слой может отсутствовать на части территории
+    optional: bool = False
 
 
 @dataclass
-class Detection:
-    """Одно предсказание в EPSG:3857."""
-
-    geometry: dict[str, Any]  # GeoJSON-геометрия (Polygon / Point)
-    score: float
-    class_id: int
-    class_name: str
-    source: str  # "relief" | "optic" | "geo" | "fused"
-
-    def to_geojson_feature(self) -> dict[str, Any]:
-        return {
-            "type": "Feature",
-            "geometry": self.geometry,
-            "properties": {
-                "score": float(self.score),
-                "class_id": int(self.class_id),
-                "class_name": self.class_name,
-                "source": self.source,
-            },
-        }
-
-
-@dataclass(frozen=True)
 class Site:
     """Один участок съёмки."""
 
-    site_id: str  # "site_1"
-    root: Path  # абсолютный путь
-    grid: Grid | None  # None => вывести из первого растра на диске
-    layers: dict[str, Path] = field(default_factory=dict)  # name -> путь к данным
+    site_id: str
+    root: Path
+    grid: Grid | None
+    layers: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -147,43 +61,53 @@ class DataSpec:
     """Полная спецификация датасета."""
 
     sites: list[Site]
-    classes: dict[int, str]  # {0: "background", 1: "kurgan", ...}
+    classes: tuple[str, ...]
     layer_defs: list[Layer]
     tile: int
     overlap: int
     r_tolerance: float
     iou_threshold: float
-    sigma_px: float = 8.0
-    r_nms: float = 10.0
+    sigma_px: float
+    r_nms: float
 
 
 def _fail(msg: str) -> None:
+    """Падает с сообщением, помеченным префиксом [spec]."""
     raise ValueError(f"[spec] {msg}")
 
 
 def _require(cond: bool, msg: str) -> None:
+    """Падает, если условие ложно."""
     if not cond:
         _fail(msg)
 
 
-def _parse_layer(raw: dict[str, Any]) -> Layer:
+def _parse_layer(raw: Any) -> Layer:
+    """Разбирает и валидирует один элемент блока ``layers``."""
+    _require(isinstance(raw, dict), "каждый layer — словарь")
     _require("name" in raw, "Layer без поля name")
     _require("group" in raw, f"Layer {raw.get('name')} без поля group")
+
+    name = str(raw["name"])
+    _require(name.strip() != "", "у layer пустое name")
+
     group = str(raw["group"])
-    _require(group in VALID_GROUPS, f"Layer {raw['name']}: group={group!r} не в {VALID_GROUPS}")
+    _require(group in VALID_GROUPS, f"Layer {name}: group={group!r} не в {sorted(VALID_GROUPS)}")
 
     glob = raw.get("glob", "")
-    _require(isinstance(glob, str) and glob.strip() != "", f"Layer {raw['name']}: пустой glob")
+    _require(
+        isinstance(glob, str) and glob.strip() != "",
+        f"Layer {name}: пустой glob",
+    )
 
     kind = str(raw.get("kind", "raster"))
-    _require(kind in VALID_KINDS, f"Layer {raw['name']}: kind={kind!r} не в {VALID_KINDS}")
+    _require(kind in VALID_KINDS, f"Layer {name}: kind={kind!r} не в {sorted(VALID_KINDS)}")
 
-    nodata = raw.get("nodata", None)
-    if nodata is not None:
-        nodata = float(nodata)
+    nodata_raw = raw.get("nodata")
+    nodata = None if nodata_raw is None else float(nodata_raw)
 
     return Layer(
-        name=str(raw["name"]),
+        name=name,
         group=group,
         glob=glob,
         kind=kind,
@@ -192,12 +116,37 @@ def _parse_layer(raw: dict[str, Any]) -> Layer:
     )
 
 
-def load_spec(path: str | Path) -> DataSpec:
-    """Загружает и ВАЛИДИРУЕТ DataSpec из YAML.
+def _grid_from_dict(d: Any, *, site_id: str) -> Grid:
+    """Строит :class:`expds.features.grid.Grid` из блока ``grid`` в YAML."""
+    _require(isinstance(d, dict), f"site {site_id}: grid должен быть словарём или null")
+    missing = {"crs", "pixel_size", "x_min", "y_min", "width", "height"} - set(d)
+    _require(
+        not missing,
+        f"site {site_id}: в grid не хватает полей {sorted(missing)}",
+    )
+    return Grid(
+        crs=str(d["crs"]),
+        pixel_size=float(d["pixel_size"]),
+        x_min=float(d["x_min"]),
+        y_min=float(d["y_min"]),
+        width=int(d["width"]),
+        height=int(d["height"]),
+    )
 
-    Падаем громко и рано: несовпадение CRS, отсутствие обязательного слоя,
-    кривые tile/overlap/r_tolerance/iou_threshold — это ошибки загрузки,
-    а не что-то, что можно молча проглотить.
+
+def load_spec(path: str | Path) -> DataSpec:
+    """Загружает и ВАЛИДИРУЕТ :class:`DataSpec` из YAML.
+
+    Читает тот же файл, что ``expds.pipeline_config``: обязательны секции
+    ``data``/``targets``/``tiles``. Падаем громко и рано: несовпадение CRS
+    между участками, отсутствие обязательного слоя, кривые tile/overlap —
+    это ошибки загрузки, а не то, что можно молча проглотить.
+
+    Args:
+        path: путь к YAML датасета.
+
+    Returns:
+        DataSpec.
     """
     path = Path(path)
     _require(path.is_file(), f"файл спеки не найден: {path}")
@@ -209,66 +158,102 @@ def load_spec(path: str | Path) -> DataSpec:
 
     project_root = path.resolve().parent.parent  # configs/ -> корень репо
 
-    # --- layer_defs ---
+    # --- обязательные секции костяка ---
+    data_raw = raw.get("data")
+    _require(isinstance(data_raw, dict), "нет секции 'data'")
+    targets_raw = raw.get("targets")
+    _require(isinstance(targets_raw, dict), "нет секции 'targets'")
+    tiles_raw = raw.get("tiles")
+    _require(isinstance(tiles_raw, dict), "нет секции 'tiles'")
+
+    raw_classes = targets_raw.get("classes")
+    _require(
+        isinstance(raw_classes, list) and len(raw_classes) > 0,
+        "targets.classes должен быть непустым списком",
+    )
+    _require(
+        len(set(map(str, raw_classes))) == len(raw_classes),
+        f"дублирующиеся классы: {raw_classes}",
+    )
+    classes = tuple(str(c) for c in raw_classes)
+
+    sites_dir_raw = data_raw.get("sites_dir")
+    _require(
+        isinstance(sites_dir_raw, str) and sites_dir_raw.strip() != "",
+        "data.sites_dir пустой",
+    )
+    sites_dir = Path(sites_dir_raw)
+
+    # --- слои ---
     raw_layers = raw.get("layers", [])
     _require(
-        isinstance(raw_layers, list) and len(raw_layers) > 0, "layers: должен быть непустым списком"
+        isinstance(raw_layers, list) and len(raw_layers) > 0,
+        "блок 'layers' должен быть непустым списком",
     )
     layer_defs = [_parse_layer(d) for d in raw_layers]
     layer_names = [ldef.name for ldef in layer_defs]
-    _require(len(set(layer_names)) == len(layer_names), f"дублирующиеся имена слоёв: {layer_names}")
-
-    # --- classes ---
-    raw_classes = raw.get("classes", {})
     _require(
-        isinstance(raw_classes, dict) and len(raw_classes) > 0,
-        "classes: должен быть непустым словарём {id: name}",
+        len(set(layer_names)) == len(layer_names),
+        f"дублирующиеся имена слоёв: {layer_names}",
     )
-    classes = {int(k): str(v) for k, v in raw_classes.items()}
 
-    # --- скалярные параметры ---
-    tile = int(raw.get("tile", 512))
-    overlap = int(raw.get("overlap", 128))
-    r_tolerance = float(raw.get("r_tolerance", 10.0))
-    iou_threshold = float(raw.get("iou_threshold", 0.5))
-
+    # --- масштаб тайлов: те же ключи, что в pipeline_config ---
+    _require("tile_px" in tiles_raw, "tiles.tile_px обязателен")
+    _require("overlap_px" in tiles_raw, "tiles.overlap_px обязателен")
+    tile = int(tiles_raw["tile_px"])
+    overlap = int(tiles_raw["overlap_px"])
     _require(
         tile > overlap >= 0,
-        f"требуется tile > overlap >= 0, получено tile={tile}, overlap={overlap}",
+        f"требуется tiles.tile_px > tiles.overlap_px >= 0, получено {tile} / {overlap}",
     )
-    _require(tile % 32 == 0, f"tile={tile} должен делиться на 32")
-    _require(r_tolerance > 0, f"r_tolerance={r_tolerance} должен быть > 0")
-    _require(0 < iou_threshold <= 1, f"iou_threshold={iou_threshold} должен быть в (0, 1]")
+    _require(
+        tile % TILE_DIVISOR == 0,
+        f"tiles.tile_px={tile} должен делиться на {TILE_DIVISOR}",
+    )
 
-    # --- sites ---
+    # --- метрика ---
+    eval_raw = raw.get("eval") or {}
+    _require(isinstance(eval_raw, dict), "секция 'eval' должна быть словарём")
+    r_tolerance = float(eval_raw.get("r_tol", 5.0))
+    iou_threshold = float(eval_raw.get("iou_thr", 0.5))
+    _require(r_tolerance > 0, f"eval.r_tol={r_tolerance} должен быть > 0")
+    _require(0 < iou_threshold <= 1, f"eval.iou_thr={iou_threshold} должен быть в (0, 1]")
+
+    post_raw = raw.get("post") or {}
+    _require(isinstance(post_raw, dict), "секция 'post' должна быть словарём")
+    r_nms = float(post_raw.get("nms_radius_px", 6.0))
+
+    sigma_px = float(targets_raw.get("heatmap_sigma_px", 8.0))
+
+    # --- участки ---
     raw_sites = raw.get("sites", [])
     _require(
-        isinstance(raw_sites, list) and len(raw_sites) > 0, "sites: должен быть непустым списком"
+        isinstance(raw_sites, list) and len(raw_sites) > 0,
+        "блок 'sites' должен быть непустым списком",
     )
 
     sites: list[Site] = []
     crs_seen: set[str] = set()
-
     for rs in raw_sites:
         _require(isinstance(rs, dict), "каждый site — словарь")
         site_id = str(rs.get("site_id", ""))
         _require(site_id != "", "у site пустой site_id")
 
-        root_raw = rs.get("root", "")
-        _require(str(root_raw).strip() != "", f"site {site_id}: пустой root")
-        site_root = (
-            (project_root / root_raw).resolve()
-            if not Path(root_raw).is_absolute()
-            else Path(root_raw).resolve()
-        )
+        # root необязателен: по умолчанию <data.sites_dir>/<site_id>.
+        root_raw = rs.get("root")
+        if root_raw is None or str(root_raw).strip() == "":
+            site_root = sites_dir / site_id
+        else:
+            site_root = Path(str(root_raw))
+        if not site_root.is_absolute():
+            site_root = project_root / site_root
+        site_root = site_root.resolve()
 
-        # grid: либо в спеке, либо None (выведем из растра)
         grid = None
         if rs.get("grid"):
-            grid = Grid.from_dict(rs["grid"])
+            grid = _grid_from_dict(rs["grid"], site_id=site_id)
             crs_seen.add(grid.crs)
 
-        # layers: name -> путь (глоб)
         site_layers = rs.get("layers", {})
         _require(
             isinstance(site_layers, dict),
@@ -278,8 +263,8 @@ def load_spec(path: str | Path) -> DataSpec:
         found: dict[str, Path] = {}
         for ldef in layer_defs:
             pat = site_layers.get(ldef.name, ldef.glob)
-            base = site_root if site_root.exists() else project_root / str(root_raw)
-            matches = sorted(base.glob(pat)) if base.exists() else []
+            base = site_root if site_root.exists() else project_root / sites_dir
+            matches = sorted(base.glob(str(pat))) if base.exists() else []
             if matches:
                 found[ldef.name] = matches[0].resolve()
             else:
@@ -291,7 +276,8 @@ def load_spec(path: str | Path) -> DataSpec:
         sites.append(Site(site_id=site_id, root=site_root, grid=grid, layers=found))
 
     _require(
-        len(crs_seen) <= 1, f"все sites должны иметь одинаковый crs, найдено: {sorted(crs_seen)}"
+        len(crs_seen) <= 1,
+        f"все sites должны иметь одинаковый crs, найдено: {sorted(crs_seen)}",
     )
 
     return DataSpec(
@@ -302,6 +288,6 @@ def load_spec(path: str | Path) -> DataSpec:
         overlap=overlap,
         r_tolerance=r_tolerance,
         iou_threshold=iou_threshold,
-        sigma_px=float(raw.get("sigma_px", 8.0)),
-        r_nms=float(raw.get("r_nms", 10.0)),
+        sigma_px=sigma_px,
+        r_nms=r_nms,
     )

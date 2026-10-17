@@ -1,23 +1,121 @@
-# Реальный датасет организаторов. Слои лежат вне git (Яндекс.Диск).
-# Реестр ссылок — data/README.md. Пути подставь под фактическую раскладку.
-name: dataset_real
-tile: 512
-overlap: 128
-r_tolerance: 15.0
-iou_threshold: 0.5
-sigma_px: 10.0
-r_nms: 12.0
+# ============================================================
+# Реальный датасет организаторов (раскладка на диске, вне git)
+# ============================================================
+# Формат = формат костяка (configs/dataset_synthetic.yaml):
+#   data / targets / tiles — обязательны, остальное по умолчанию.
+# Блоки layers/sites читает expds.spec.load_spec, pipeline_config их игнорирует.
+#
+# Слои лежат вне git (Яндекс.Диск), реестр ссылок — data/README.md.
+# Скачать: make data
+# ============================================================
 
-classes:
-  0: background
-  1: kurgan
-  2: ditch
-  3: dipole
+
+data:
+  # Каталог участков: data/raw/<site_id>/...
+  sites_dir: data/raw
+  labels_file: labels.geojson
+  # Порядок = контракт модели (сохраняется в чекпоинт).
+  channels:
+    - dtm
+    - slope
+    - hillshade_az_45
+    - hillshade_az_135
+    - hillshade_az_225
+    - hillshade_az_315
+    - slrm_sigma_8.0
+    - positive_openness
+    - negative_openness
+    - sky_view_factor
+    - curvature_sigma_2.0
+    - tpi_radius_5
+    - tri_radius_3
+    - point_density
+    - mean_intensity
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
+  # none | site_robust: (x - median) / (p98 - p2) по валидным пикселям участка.
+  normalize: site_robust
+  labels_crs: EPSG:3857
+
+
+targets:
+  # NULL вместо класса 0: строки = контракт модели, порядок фиксирован.
+  classes: [mound, rampart, ditch]
+  heatmap_sigma_px: 3.0
+
+
+tiles:
+  tile_px: 512
+  overlap_px: 128
+  pos_fraction: 0.7
+
+
+model:
+  arch: unet          # unet | stub (stub: CI/e2e)
+  encoder: resnet34   # encoder_weights всегда None (офлайн)
+  prior_prob: 0.01
+
+
+loss:
+  seg_weight: 1.0
+  hm_weight: 1.0
+  dice_weight: 0.5
+  focal_weight: 0.5
+  hm_min_norm: 50.0
+
+
+stitch:
+  window: hann   # hann | flat
+  eps: 0.001
+
+
+post:
+  seg_thr: 0.5
+  min_area_px: 16
+  simplify_px: 0.5
+  hm_thr: 0.3
+  peak_window_px: 7
+  point_radius_px: 4.0
+  point_vertices: 16
+  nms_radius_px: 12.0
+  max_detections: 2000
+
+
+eval:
+  iou_thr: 0.5
+  r_tol: 15.0
+  r_tol_units: crs   # crs | meters — уточнить по регламенту
+  iou_samples: 128
+  class_agnostic: false
+
+
+train:
+  epochs: 10
+  batch_size: 8
+  lr: 0.001
+  weight_decay: 0.0001
+  amp: true
+  device: auto
+  num_workers: 2
+  seed: 0
+  tiles_per_epoch: 512
+  train_sites: []
+  val_sites: []
+  runs_dir: runs
+
+
+# ============================================================
+# Реестр слоёв (читает expds.spec.load_spec)
+# group: relief | optic | geo     kind: raster | pointcloud
+# ============================================================
+
 
 layers:
   - name: dtm
     group: relief
-    glob: "*.tif"
+    glob: "dtm.tif"
     kind: raster
     optional: false
   - name: hillshade
@@ -41,8 +139,16 @@ layers:
     kind: raster
     optional: true
 
+
+# ============================================================
+# Участки (читает expds.spec.load_spec)
+# root необязателен: по умолчанию <data.sites_dir>/<site_id>.
+# grid необязателен: null => вывести из первого растра на диске.
+# ============================================================
+
+
 sites:
-  - site_id: site_1
-    root: data/raw/site_1
+  - site_id: 013_Nora_Vinnon
     grid: null
-    layers: {}
+  - site_id: 048
+    grid: null
