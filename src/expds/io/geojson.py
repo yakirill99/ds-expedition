@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 GEOM_POINT = "Point"
 GEOM_POLYGON = "Polygon"
 
+# Источники детекций (мультимодальная фузия, стек 2).
+SOURCE_RELIEF = "relief"  # производные рельефа (DTM, hillshade, SLRM)
+SOURCE_OPTIC = "optic"  # аэрофото / снимки
+SOURCE_GEO = "geo"  # магнитка, георадар
+SOURCE_FUSED = "fused"  # объединено после фузии
+_SOURCES = frozenset({SOURCE_RELIEF, SOURCE_OPTIC, SOURCE_GEO, SOURCE_FUSED})
+_SOURCE_KEY = "source"
+
 _DEFAULT_CLASS_KEY = "class"
 _SCORE_KEY = "score"
 _AREA_EPS = 1e-12
@@ -151,15 +159,17 @@ class Detection:
     """Предсказанный объект в crs.internal.
 
     geometry: Point — (1, 2); Polygon — внешнее кольцо (N, 2) без замыкания.
+    source — источник детекции, нужен мультимодальной фузии (стек 2).
     """
 
     cls: str
     score: float
     geom_type: str
     geometry: np.ndarray
+    source: str = SOURCE_RELIEF
 
     def __post_init__(self) -> None:
-        """Валидация типа и формы."""
+        """Валидация типа, формы и источника."""
         if self.geom_type not in (GEOM_POINT, GEOM_POLYGON):
             raise ValueError(f"Detection: неизвестный тип {self.geom_type}")
         if self.geometry.ndim != 2 or self.geometry.shape[1] != 2:
@@ -168,6 +178,11 @@ class Detection:
             )
         if self.geom_type == GEOM_POLYGON and len(self.geometry) < 3:
             raise ValueError("Detection: у полигона меньше 3 вершин")
+        if self.source not in _SOURCES:
+            raise ValueError(
+                f"Detection: неизвестный source {self.source!r}, "
+                f"ожидался один из {sorted(_SOURCES)}"
+            )
 
     @property
     def centroid(self) -> np.ndarray:
@@ -269,7 +284,11 @@ def write_detections(
         features.append(
             {
                 "type": "Feature",
-                "properties": {class_key: det.cls, _SCORE_KEY: float(det.score)},
+                "properties": {
+                    class_key: det.cls,
+                    _SCORE_KEY: float(det.score),
+                    _SOURCE_KEY: det.source,
+                },
                 "geometry": geometry,
             }
         )
