@@ -77,6 +77,10 @@
         const statusEl = document.getElementById('status');
         let currentLayers = {};
 
+        const GEOJSON_COLORS = [
+            '#ff7800', '#0078ff', '#00c853', '#d500f9', '#00b8d4', '#ff1744'
+        ];
+
         function showError(message) {
             statusEl.textContent = message;
             statusEl.style.display = 'block';
@@ -144,20 +148,23 @@
                     }
                 });
 
+                let geoJsonIndex = 0;
                 data.layers.forEach(layer => {
                     const isGeoJson = layer.type === 'geojson';
                     let mapLayer;
 
                     if (isGeoJson) {
+                        const layerColor = GEOJSON_COLORS[geoJsonIndex % GEOJSON_COLORS.length];
+                        geoJsonIndex += 1;
                         mapLayer = L.geoJSON(null, {
                             style: {
-                                color: '#ff7800',
+                                color: layerColor,
                                 weight: 2,
                                 opacity: 0.85,
                                 fillOpacity: 0.2,
                             },
                             pointToLayer: (feature, latlng) =>
-                                L.circleMarker(latlng, { radius: 6, color: '#ff7800' }),
+                                L.circleMarker(latlng, { radius: 6, color: layerColor }),
                         });
                         fetch(layer.geojson_url)
                             .then(r => {

@@ -49,6 +49,16 @@ def test_map_page_uses_radio_for_raster_layers(client: Client) -> None:
 
 
 @pytest.mark.django_db
+def test_map_page_assigns_colors_to_geojson_layers(client: Client) -> None:
+    """GeoJSON-слои получают разные цвета из палитры."""
+    response = client.get(reverse("viz-index"))
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "GEOJSON_COLORS" in content
+    assert "const layerColor = GEOJSON_COLORS[geoJsonIndex % GEOJSON_COLORS.length]" in content
+
+
+@pytest.mark.django_db
 def test_location_list_empty(client: Client) -> None:
     """API локаций возвращает пустой список, если данных нет."""
     response = client.get(reverse("viz-location-list"))
