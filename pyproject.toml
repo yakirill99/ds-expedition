@@ -44,7 +44,9 @@ select = ["E", "F", "I", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 DJANGO_SETTINGS_MODULE = "web.config.settings"
+django_find_project = false
 python_files = ["test_*.py", "*_test.py"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["hatchling"]
