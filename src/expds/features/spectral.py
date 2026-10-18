@@ -1,9 +1,9 @@
 """Спектральные индексы из мультиканальных снимков (NDVI, SR, ARI, ...).
 
-Зачем: NDVI/SR/ARI — классические индексы для выявления угнетённой
-растительности над скрытыми археологическими объектами (см. статью
-о применении МО в археологии). Они дают модели дополнительный сигнал,
-которого нет в grayscale и в лидаре.
+Зачем: NDVI/SR/ARI/SAVI — классические индексы для выявления угнетённой
+растительности и нарушенного грунта над скрытыми археологическими
+объектами (см. статью о применении МО в археологии). Они дают модели
+дополнительный сигнал, которого нет в grayscale и в лидаре.
 
 Модуль работает на массивах каналов (уже прочитанных и приведённых
 к общей сетке), а не на файлах. Чтение GeoTIFF и ресэмплинг — снаружи
@@ -19,6 +19,15 @@
 считаются константными (alpha-маска, nodata-заливка) и в индексы не идут.
 Иначе NDVI/ARI на константном канале дают мусор, который модель примет
 за сигнал.
+
+Используемые каналы:
+- NDVI, SR, GNDVI, NDWI — Red и/или NIR и/или Green.
+- ARI — Green и Red.
+- SAVI — Red и NIR (Soil-Adjusted Vegetation Index, устойчив к почвенному
+  фону — важно для распаханных курганов).
+- NDBI (Normalized Difference Built-up Index) — требует SWIR, которого
+  в наших данных нет, поэтому НЕ реализован. blue_channel в конфиге
+  зарезервирован на будущее.
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ INDEX_SR = "sr"
 INDEX_ARI = "ari"
 INDEX_GNDVI = "gndvi"
 INDEX_NDWI = "ndwi"
+INDEX_SAVI = "savi"
 
 SUPPORTED_INDICES = (
     INDEX_NDVI,
@@ -46,6 +56,7 @@ SUPPORTED_INDICES = (
     INDEX_ARI,
     INDEX_GNDVI,
     INDEX_NDWI,
+    INDEX_SAVI,
 )
 
 # Константы: защита от деления на ноль.
@@ -61,6 +72,12 @@ _SR_MAX = 20.0
 # Константы: верхний предел |ARI| (1/green - 1/red, при uint8-яркостях
 # разумный предел — единицы; выбросы обрезаем).
 _ARI_ABS_MAX = 10.0
+
+# Константы: SAVI. L — параметр адаптации к плотности растительности.
+# L=0.5 — рекомендованный стандарт (Huete, 1988).
+_SAVI_L = 0.5
+_SAVI_MIN = -1.5
+_SAVI_MAX = 1.5
 
 
 @dataclass(frozen=True)
@@ -261,6 +278,38 @@ def compute_ndwi(
     return _apply_valid_mask(ndwi, valid, nodata)
 
 
+def compute_savi(
+    red: np.ndarray,
+    nir: np.ndarray,
+    valid: np.ndarray,
+    nodata: float,
+    l_factor: float = _SAVI_L,
+) -> np.ndarray:
+    """SAVI = (NIR - Red) / (NIR + Red + L) * (1 + L).
+
+    Soil-Adjusted Vegetation Index (Huete, 1988). Устойчив к почвенному
+    фону — важно для распаханных курганов и открытого грунта, где NDVI
+    занижен из-за яркой почвы.
+
+    Args:
+        red: канал красного.
+        nir: канал ближнего инфракрасного.
+        valid: маска валидных пикселей.
+        nodata: значение nodata.
+        l_factor: параметр L (0.5 — стандарт Huete).
+
+    Returns:
+        2D float32 массив SAVI, nodata в невалидных пикселях.
+    """
+    nir_f = nir.astype(np.float64)
+    red_f = red.astype(np.float64)
+    numer = (nir_f - red_f) * (1.0 + l_factor)
+    denom = nir_f + red_f + l_factor
+    savi = _safe_ratio(numer, denom)
+    savi = np.clip(savi, _SAVI_MIN, _SAVI_MAX)
+    return _apply_valid_mask(savi, valid, nodata)
+
+
 def _is_informative(
     channel: np.ndarray | None,
     valid_mask: np.ndarray,
@@ -353,7 +402,8 @@ def build_spectral_indices(
     red = _get_channel(channels, config.red_channel, "red")
     nir = _get_channel(channels, config.nir_channel, "nir")
     green = _get_channel(channels, config.green_channel, "green")
-    # blue в индексах не используется (оставлен на будущее — SAVI/NDBI).
+    # blue_channel в текущих индексах не используется: NDBI требует SWIR,
+    # которого в наших данных нет. Поле оставлено на будущее.
 
     std_min = config.channel_std_min
     red_ok = _is_informative(red, valid_mask, std_min)
@@ -452,6 +502,22 @@ def build_spectral_indices(
             logger.info("Построен индекс: %s", INDEX_NDWI)
         else:
             skipped.append(INDEX_NDWI)
+
+    if INDEX_SAVI in enabled:
+        if _need(red_ok, nir_ok):
+            data = compute_savi(red=red, nir=nir, valid=valid_mask, nodata=config.nodata)  # type: ignore[arg-type]
+            layers[INDEX_SAVI] = Layer(
+                name=INDEX_SAVI,
+                data=data,
+                grid=grid,
+                nodata=config.nodata,
+                source=source,
+                license="unknown",
+                unit="index",
+            )
+            logger.info("Построен индекс: %s", INDEX_SAVI)
+        else:
+            skipped.append(INDEX_SAVI)
 
     if skipped:
         logger.info("Пропущены индексы (нет каналов или канал константный): %s", skipped)

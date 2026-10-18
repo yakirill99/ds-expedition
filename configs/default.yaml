@@ -75,15 +75,19 @@ align:
   max_shift: 5
   confidence_threshold: 0.3
 
-# Спектральные индексы для оптики (NDVI, SR, ARI, GNDVI, NDWI).
-# Индексы каналов 0-based. Если nir_channel=null — NDVI/SR не строятся
-# (graceful skip для grayscale-снимков, где NIR физически отсутствует).
+# Спектральные индексы для оптики (NDVI, SR, ARI, GNDVI, NDWI, SAVI).
+# Индексы каналов 0-based. Если nir_channel=null — NDVI/SR/GNDVI/NDWI/SAVI
+# не строятся (graceful skip для grayscale-снимков, где NIR физически
+# отсутствует).
 #
 # channel_std_min — минимальное std канала, чтобы признать его информативным.
 # Константные каналы (alpha-маска=255, nodata-заливка) исключаются из индексов,
 # иначе NDVI/ARI на них дают мусор.
+#
+# blue_channel зарезервирован: NDBI требует SWIR, которого в наших данных нет.
+# Когда появятся мультиспектральные снимки с SWIR — добавим NDBI.
 spectral:
-  enabled: [ndvi, sr, ari, gndvi, ndwi]
+  enabled: [ndvi, sr, ari, gndvi, ndwi, savi]
   red_channel: 0
   nir_channel: 3
   green_channel: 1

@@ -565,6 +565,12 @@ def reproject_layers_to_crs(
     перепроецирования разные слои могут получить немного разные bounds
     из-за округления — приводим к общему.
 
+    ВАЖНО: сетка строится по bounds ПЕРВОГО слоя. Если другой слой
+    выходит за эти bounds (например, оптика шире лидара), его внешняя
+    часть будет обрезана. Функция логирует предупреждение для таких
+    слоёв — при необходимости передавай первым слой с наибольшим
+    покрытием или строй сетку заранее.
+
     Args:
         layers: словарь имя -> Layer.
         target_crs: целевая CRS.
@@ -592,6 +598,14 @@ def reproject_layers_to_crs(
         resampling=methods.get(first_name, default_method),
     )
     target_grid = first.grid
+    logger.info(
+        "Целевая сетка по слою '%s': %dx%d, pixel=%.4f, CRS=%s",
+        first_name,
+        target_grid.width,
+        target_grid.height,
+        target_grid.pixel_size,
+        target_grid.crs,
+    )
     result: dict[str, Layer] = {first_name: first}
 
     for name, layer in layers.items():
@@ -603,6 +617,27 @@ def reproject_layers_to_crs(
             target_pixel_size=target_pixel_size,
             resampling=methods.get(name, default_method),
         )
+
+        # Проверяем, выходит ли слой за bounds целевой сетки.
+        src_bounds = reprojected.grid.bounds
+        dst_bounds = target_grid.bounds
+        eps = 1e-6
+        extends_beyond = (
+            src_bounds[0] < dst_bounds[0] - eps
+            or src_bounds[1] < dst_bounds[1] - eps
+            or src_bounds[2] > dst_bounds[2] + eps
+            or src_bounds[3] > dst_bounds[3] + eps
+        )
+        if extends_beyond:
+            logger.warning(
+                "Слой '%s' выходит за bounds целевой сетки (%s vs %s): "
+                "внешняя часть будет обрезана. Первым передан слой "
+                "с меньшим покрытием?",
+                name,
+                src_bounds,
+                dst_bounds,
+            )
+
         result[name] = resample_layer(
             layer=reprojected,
             target_grid=target_grid,
