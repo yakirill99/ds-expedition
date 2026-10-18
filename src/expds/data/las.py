@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -15,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 # Константы: коэффициенты перевода единиц высоты.
 _FEET_TO_METERS = 0.3048
+
+# Константы: параметры инвентаризации.
+_INTENSITY_HISTOGRAM_BINS = 16
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,13 @@ class LasSummary:
 
     Границы XY и диапазон Z — в метрах, в target_crs.
     z_range_raw — в исходных единицах файла, для контроля.
+
+    Поля инвентаризации:
+        point_density — точек на м², по площади bounds.
+        intensity_histogram — гистограмма intensity, форма (bins,).
+        intensity_bin_edges — границы бинов гистограммы, форма (bins+1,).
+        classification_counts — словарь {класс: количество точек}.
+        non_first_return_ratio — доля точек с return_number > 1.
     """
 
     header: LasHeaderInfo
@@ -43,6 +54,11 @@ class LasSummary:
     z_range_raw: tuple[float, float]
     z_range_meters: tuple[float, float]
     unit: str
+    point_density: float
+    intensity_histogram: np.ndarray
+    intensity_bin_edges: np.ndarray
+    classification_counts: dict[int, int] = field(default_factory=dict)
+    non_first_return_ratio: float = 0.0
 
 
 def _build_transformer(
@@ -73,7 +89,6 @@ def _detect_z_unit(z_range_raw: tuple[float, float], declared_unit: str) -> str:
     """
     span = abs(z_range_raw[1] - z_range_raw[0])
     # Эвристика: если разброс высот больше 100, это почти наверняка футы.
-    # Для Raleigh (Северная Каролина) рельеф пологий, метры дали бы десятки.
     if declared_unit == "feet" and span > 100:
         return "feet"
     if declared_unit == "meters" and span > 100:
@@ -166,9 +181,23 @@ def read_points(
 ) -> Iterator[np.ndarray]:
     """Читает точки LAS/LAZ чанками, возвращает метры в target_crs.
 
+    Отдаёт генератор массивов формы (N, 6): X, Y, Z, intensity,
+    return_number, classification. X, Y, Z — в метрах в target_crs.
+
+    Args:
+        path: путь к LAS/LAZ-файлу.
+        chunk_size: число точек в одном чанке.
+        source_crs: CRS исходных данных (например, "EPSG:3358").
+        target_crs: CRS для внутренних расчётов (например, "EPSG:32617").
+        source_z_unit: единица Z в исходном файле ("feet" или "meters").
+        max_points: ограничение общего числа точек (None = без ограничения).
+
     Yields:
-        np.ndarray формы (N, 6): X, Y, Z, intensity, return_number, classification.
-        X, Y, Z — в метрах в target_crs.
+        np.ndarray формы (N, 6).
+
+    Raises:
+        FileNotFoundError: если файл не найден.
+        ValueError: если chunk_size <= 0.
     """
     if not path.exists():
         raise FileNotFoundError(f"LAS-файл не найден: {path}")
@@ -184,7 +213,7 @@ def read_points(
             y = np.asarray(chunk.y, dtype=np.float64)
             z = np.asarray(chunk.z, dtype=np.float64)
 
-            # Z: единицы файла → метры.
+            # Z: единицы файла -> метры.
             z = _convert_z_to_meters(z_values=z, unit=source_z_unit)
 
             # X, Y: перепроецирование в internal_crs.
@@ -199,7 +228,7 @@ def read_points(
             if max_points is not None:
                 remaining = max_points - produced
                 if remaining <= 0:
-                    logger.info("Достигнут max_points=%d", max_points)
+                    logger.info("Достигнут max_points=%d, чтение остановлено", max_points)
                     return
                 if block.shape[0] > remaining:
                     block = block[:remaining]
@@ -216,22 +245,25 @@ def summarize(
     target_crs: str,
     max_points: int | None = None,
 ) -> LasSummary:
-    """Собирает сводку по LAS-файлу: заголовок, границы XY и диапазон Z.
+    """Собирает сводку по LAS-файлу: заголовок, границы, инвентаризация.
 
-    Читает точки в target_crs и метрах, поэтому границы XY и Z — уже
-    в метрах. Отдельно сохраняет исходный диапазон Z для контроля единиц.
+    Читает точки в target_crs и метрах. Считает:
+        - границы XY и диапазон Z,
+        - плотность точек на м²,
+        - гистограмму intensity,
+        - распределение по classification,
+        - долю непервых отражений (return_number > 1).
 
     Args:
         path: путь к LAS/LAZ-файлу.
         source_z_unit: заявленная единица высоты из конфига.
         chunk_size: размер чанка при чтении.
-        source_crs: CRS исходных данных (например, "EPSG:3358").
-        target_crs: CRS для внутренних расчётов (например, "EPSG:32617").
+        source_crs: CRS исходных данных.
+        target_crs: CRS для внутренних расчётов.
         max_points: ограничение числа точек (None = все).
 
     Returns:
-        LasSummary с заголовком, границами XY в target_crs (метры)
-        и диапазонами Z в исходных единицах и метрах.
+        LasSummary с заголовком, границами, диапазоном Z и инвентаризацией.
     """
     header = read_header(path=path)
 
@@ -240,9 +272,15 @@ def summarize(
     x_max_m = float("-inf")
     y_min_m = float("inf")
     y_max_m = float("-inf")
-    # Диапазон Z в метрах (после конвертации единиц).
+    # Диапазон Z в метрах.
     z_min_m = float("inf")
     z_max_m = float("-inf")
+
+    # Накопители для инвентаризации.
+    n_total = 0
+    n_non_first = 0
+    classification_counter: Counter[int] = Counter()
+    intensity_chunks: list[np.ndarray] = []
 
     for block in read_points(
         path=path,
@@ -255,6 +293,9 @@ def summarize(
         x = block[:, 0]
         y = block[:, 1]
         z = block[:, 2]
+        intensity = block[:, 3]
+        return_number = block[:, 4]
+        classification = block[:, 5]
 
         x_min_m = min(x_min_m, float(x.min()))
         x_max_m = max(x_max_m, float(x.max()))
@@ -262,6 +303,15 @@ def summarize(
         y_max_m = max(y_max_m, float(y.max()))
         z_min_m = min(z_min_m, float(z.min()))
         z_max_m = max(z_max_m, float(z.max()))
+
+        n_total += len(block)
+        n_non_first += int((return_number > 1).sum())
+        intensity_chunks.append(intensity)
+
+        # Классы: обновляем Counter.
+        unique_cls, counts = np.unique(classification, return_counts=True)
+        for cls, cnt in zip(unique_cls, counts, strict=True):
+            classification_counter[int(cls)] += int(cnt)
 
     z_range_meters = (z_min_m, z_max_m)
 
@@ -273,12 +323,34 @@ def summarize(
 
     actual_unit = _detect_z_unit(z_range_raw=z_range_raw, declared_unit=source_z_unit)
 
+    # Плотность точек на м².
+    area_m2 = (x_max_m - x_min_m) * (y_max_m - y_min_m)
+    point_density = n_total / area_m2 if area_m2 > 0 else 0.0
+
+    # Гистограмма intensity.
+    if intensity_chunks:
+        all_intensity = np.concatenate(intensity_chunks)
+        intensity_hist, intensity_edges = np.histogram(
+            all_intensity, bins=_INTENSITY_HISTOGRAM_BINS
+        )
+    else:
+        intensity_hist = np.zeros(_INTENSITY_HISTOGRAM_BINS, dtype=np.int64)
+        intensity_edges = np.zeros(_INTENSITY_HISTOGRAM_BINS + 1, dtype=np.float64)
+
+    # Доля непервых отражений.
+    non_first_ratio = n_non_first / n_total if n_total > 0 else 0.0
+
     summary = LasSummary(
         header=header,
         bounds_xy_m=(x_min_m, y_min_m, x_max_m, y_max_m),
         z_range_raw=z_range_raw,
         z_range_meters=z_range_meters,
         unit=actual_unit,
+        point_density=point_density,
+        intensity_histogram=intensity_hist,
+        intensity_bin_edges=intensity_edges,
+        classification_counts=dict(classification_counter),
+        non_first_return_ratio=non_first_ratio,
     )
 
     width_km = (x_max_m - x_min_m) / 1000.0
@@ -296,5 +368,11 @@ def summarize(
         z_min_m,
         z_max_m,
         actual_unit,
+    )
+    logger.info(
+        "Инвентаризация: плотность=%.2f точек/м² | классы=%s | доля непервых=%.1f%%",
+        point_density,
+        summary.classification_counts,
+        100.0 * non_first_ratio,
     )
     return summary

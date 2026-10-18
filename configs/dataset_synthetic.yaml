@@ -278,3 +278,9 @@ train:
   train_sites: [site_1, site_2]
   val_sites: [site_3]
   runs_dir: runs
+  # Аугментации тайлов (train только; val/инференс — без них).
+  augment:
+    hflip_p: 0.5
+    vflip_p: 0.5
+    rot90_p: 0.5
+    channel_dropout_p: 0.1

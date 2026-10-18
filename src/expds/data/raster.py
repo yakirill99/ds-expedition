@@ -24,7 +24,7 @@ from rasterio.enums import Resampling
 from rasterio.transform import Affine
 from rasterio.warp import reproject
 
-from expds.features.grid import Grid, Layer
+from expds.features.grid import Grid, Layer, grid_to_affine
 
 logger = logging.getLogger(__name__)
 
@@ -99,29 +99,6 @@ def _build_grid_from_raster(
     )
 
 
-def _build_transform(grid: Grid) -> Affine:
-    """Строит affine-трансформацию rasterio из нашего Grid.
-
-    rasterio ожидает верхний левый угол:
-        transform = Affine(pixel_size, 0, x_min, 0, -pixel_size, y_max)
-
-    Args:
-        grid: наша сетка.
-
-    Returns:
-        Affine для rasterio.
-    """
-    _, _, _, y_max = grid.bounds
-    return Affine(
-        grid.pixel_size,
-        0.0,
-        grid.x_min,
-        0.0,
-        -grid.pixel_size,
-        y_max,
-    )
-
-
 def _resample_to_grid(
     source: np.ndarray,
     src_transform: Affine,
@@ -149,7 +126,7 @@ def _resample_to_grid(
     Returns:
         np.ndarray float32 формы target_grid.shape.
     """
-    dst_transform = _build_transform(target_grid)
+    dst_transform = grid_to_affine(target_grid)
     dst_crs = CRS.from_user_input(target_grid.crs)
     dst = np.full(target_grid.shape, target_nodata, dtype=np.float32)
 
@@ -349,7 +326,7 @@ def write_raster(
         raise ValueError(f"Неподдерживаемый dtype: {dtype}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    transform = _build_transform(layer.grid)
+    transform = grid_to_affine(layer.grid)
 
     profile = {
         "driver": "GTiff",

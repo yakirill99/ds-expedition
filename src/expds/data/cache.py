@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # Версия формата кэша. Меняем при breaking changes — старый кэш игнорируется.
 _CACHE_VERSION = "v1"
 
+# Кэш версии кода: вычисляется один раз при первом обращении.
+# None означает «ещё не вычислено».
+_CODE_VERSION: str | None = None
+
 # Константы: имена файлов и суффиксы.
 _DATA_SUFFIX = ".tif"
 _META_SUFFIX = ".json"
@@ -47,6 +51,52 @@ _META_FIELD_NODATA = "nodata"
 _META_FIELD_SOURCE = "source"
 _META_FIELD_LICENSE = "license"
 _META_FIELD_UNIT = "unit"
+
+
+def _get_code_version() -> str:
+    """Возвращает версию кода expds для ключа кэша.
+
+    Пытается получить git hash текущего коммита. Если git недоступен
+    (платформа без .git), падает на __version__ пакета.
+
+    Результат кэшируется на уровне модуля — subprocess запускается
+    только один раз за процесс.
+
+    Returns:
+        Строка версии (git:<hash> или pkg:<version> или unknown).
+    """
+    global _CODE_VERSION
+    if _CODE_VERSION is not None:
+        return _CODE_VERSION
+
+    import subprocess
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
+        )
+        git_hash = result.stdout.strip()
+        if git_hash:
+            _CODE_VERSION = f"git:{git_hash[:12]}"
+            return _CODE_VERSION
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: версия пакета.
+    try:
+        from expds import __version__  # type: ignore[attr-defined]
+
+        _CODE_VERSION = f"pkg:{__version__}"
+    except (ImportError, AttributeError):
+        _CODE_VERSION = "unknown"
+    return _CODE_VERSION
 
 
 @dataclass(frozen=True)
@@ -132,6 +182,7 @@ def compute_cache_key(
     """
     payload = {
         "version": _CACHE_VERSION,
+        "code_version": _get_code_version(),
         "name": name,
         "params": params,
         "grid": _grid_to_dict(grid),

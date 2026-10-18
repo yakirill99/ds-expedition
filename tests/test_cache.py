@@ -235,3 +235,32 @@ class TestListAndSize:
 
         cache.get_or_compute(name="a", params={}, grid=grid, compute_fn=compute)
         assert cache.size_bytes() > 0
+
+
+class TestCodeVersion:
+    """Тесты _get_code_version."""
+
+    def test_returns_nonempty(self) -> None:
+        from expds.data.cache import _get_code_version
+
+        version = _get_code_version()
+        assert isinstance(version, str)
+        assert len(version) > 0
+        # Один из трёх форматов: git:<hash>, pkg:<ver>, unknown.
+        assert version.startswith("git:") or version.startswith("pkg:") or version == "unknown"
+
+    def test_cached(self) -> None:
+        from expds.data.cache import _get_code_version
+
+        v1 = _get_code_version()
+        v2 = _get_code_version()
+        assert v1 == v2
+
+    def test_in_cache_key(self, grid: Grid) -> None:
+        """Версия кода влияет на ключ."""
+        from expds.data.cache import compute_cache_key
+
+        k1 = compute_cache_key(name="test", params={}, grid=grid)
+        # Ключ должен быть стабильным.
+        k2 = compute_cache_key(name="test", params={}, grid=grid)
+        assert k1 == k2
