@@ -60,6 +60,9 @@ relief:
   tri_radii: [3, 9]
 
 cloud_features:
+  # Базовые признаки + моменты Z.
+  # height_range — прокси высоты растительности/объектов.
+  # skewness_z, kurtosis_z — форма распределения Z (растительность, здания).
   enabled:
     - point_density
     - mean_intensity
@@ -68,6 +71,9 @@ cloud_features:
     - mean_return_number
     - mean_z
     - z_std
+    - height_range
+    - skewness_z
+    - kurtosis_z
   nodata: -9999.0
 
 align:

@@ -51,6 +51,21 @@ DoD: python inference/entrypoint.py --data <сырой участок> рабо�
   (метры), 3857 — на границе векторизации.
 - Мультимодальность: inventory_site находит модальности по именам папок,
   build_site строит слои с префиксом (or_*, sp_or_*, maggr_*).
+- SAVI (Soil-Adjusted Vegetation Index): добавлен к спектральным индексам.
+  Устойчив к почвенному фону — важен для распаханных курганов. L=0.5
+  (Huete, 1988), клиппинг [-1.5, 1.5].
+- channel_std_min в SpectralConfig: константные каналы (alpha=255,
+  nodata-заливка) отбрасываются как до индексов, так и до layers/.
+  Защита от мусорных NDVI/ARI на 4-м канале SpOr.
+- Лог в align.reproject_layers_to_crs: целевая сетка строится по первому
+  слою, WARNING если слой выходит за её bounds (обрежется).
+- cloud_features: добавлены height_range, skewness_z, kurtosis_z.
+  Считаются одним проходом по Z (sum/sum_sq/sum_cube/sum_4/min/max).
+  Для ячеек с n<2 skew=0, n<3 kurt=0, n<4 kurt=0.
+- scripts/make_config_from_raster_site.py: генератор YAML по папке
+  растрового участка (аналог make_config_from_site.py). Автодетект
+  модальностей (SpOr/Or/Ae/MagGr/EtGr/TerFl), CRS из override > TIF >
+  UTM.json, nir_channel=null если <5 каналов (grayscale).
 
 Отложено:
 - Семантика Li-карт и SpOr: без расшифровки от организаторов индексы

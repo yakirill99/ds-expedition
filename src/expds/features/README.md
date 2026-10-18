@@ -46,7 +46,10 @@ cloud_features.py — растровые признаки из облака.
   build_cloud_features(x, y, z, intensity, return_number, grid, enabled,
                        nodata) -> CloudFeaturesResult.
   point_density, mean_intensity, std_intensity, non_first_return_ratio,
-  mean_return_number, mean_z, z_std.
+  mean_return_number, mean_z, z_std, height_range, skewness_z, kurtosis_z.
+  height_range = max_z - min_z на ячейку (прокси высоты растительности).
+  skewness_z/kurtosis_z — моменты Z (форма распределения: растительность,
+  здания). Считаются одним проходом (_compute_z_moments).
 
 spectral.py — спектральные индексы из оптики.
   build_spectral_indices(channels, valid_mask, grid, config, source)

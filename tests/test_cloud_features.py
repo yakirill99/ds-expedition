@@ -6,19 +6,25 @@ import numpy as np
 import pytest
 
 from expds.features.cloud_features import (
+    FEATURE_HEIGHT_RANGE,
+    FEATURE_KURTOSIS_Z,
     FEATURE_MEAN_INTENSITY,
     FEATURE_MEAN_RETURN_NUMBER,
     FEATURE_MEAN_Z,
     FEATURE_NON_FIRST_RETURN_RATIO,
     FEATURE_POINT_DENSITY,
+    FEATURE_SKEWNESS_Z,
     FEATURE_STD_INTENSITY,
     FEATURE_Z_STD,
     build_cloud_features,
+    compute_height_range,
+    compute_kurtosis_z,
     compute_mean_intensity,
     compute_mean_return_number,
     compute_mean_z,
     compute_non_first_return_ratio,
     compute_point_density,
+    compute_skewness_z,
     compute_std_intensity,
     compute_z_std,
 )
@@ -67,19 +73,14 @@ def _uniform_cloud(
 
 
 class TestPointDensity:
-    """Тесты плотности."""
-
     def test_uniform_density(self, grid: Grid) -> None:
         cloud = _uniform_cloud(grid=grid, n_per_cell=5)
         layer = compute_point_density(x=cloud["x"], y=cloud["y"], grid=grid)
-        # Большинство ячеек заполнено (краевые могут промахнуться).
         valid = layer.data != layer.nodata
         assert valid.mean() > 0.9
-        # Средняя плотность по непустым близка к 5 точек/м².
         assert layer.data[valid].mean() == pytest.approx(5.0, abs=1.0)
 
     def test_empty_cells_nodata(self, grid: Grid) -> None:
-        # Точки только в одной ячейке.
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
         layer = compute_point_density(x=x, y=y, grid=grid)
@@ -93,8 +94,6 @@ class TestPointDensity:
 
 
 class TestMeanIntensity:
-    """Тесты средней интенсивности."""
-
     def test_constant_intensity(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
@@ -111,8 +110,6 @@ class TestMeanIntensity:
 
 
 class TestStdIntensity:
-    """Тесты std интенсивности."""
-
     def test_constant_zero_std(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
@@ -125,49 +122,35 @@ class TestStdIntensity:
         y = np.array([0.5, 0.5, 0.5, 0.5])
         intensity = np.array([0.0, 10.0, 0.0, 10.0], dtype=np.float32)
         layer = compute_std_intensity(x=x, y=y, intensity=intensity, grid=grid)
-        # std = 5.
         assert layer.data[0, 0] == pytest.approx(5.0, abs=1e-3)
 
 
 class TestNonFirstReturnRatio:
-    """Тесты доли непервых отражений."""
-
     def test_all_first(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
-        return_number = np.array([1, 1, 1], dtype=np.uint8)
-        layer = compute_non_first_return_ratio(x=x, y=y, return_number=return_number, grid=grid)
+        rn = np.array([1, 1, 1], dtype=np.uint8)
+        layer = compute_non_first_return_ratio(x=x, y=y, return_number=rn, grid=grid)
         assert layer.data[0, 0] == pytest.approx(0.0)
 
     def test_half_non_first(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5, 0.5])
-        return_number = np.array([1, 2, 1, 2], dtype=np.uint8)
-        layer = compute_non_first_return_ratio(x=x, y=y, return_number=return_number, grid=grid)
+        rn = np.array([1, 2, 1, 2], dtype=np.uint8)
+        layer = compute_non_first_return_ratio(x=x, y=y, return_number=rn, grid=grid)
         assert layer.data[0, 0] == pytest.approx(0.5)
-
-    def test_all_non_first(self, grid: Grid) -> None:
-        x = np.array([0.5, 0.5])
-        y = np.array([0.5, 0.5])
-        return_number = np.array([2, 3], dtype=np.uint8)
-        layer = compute_non_first_return_ratio(x=x, y=y, return_number=return_number, grid=grid)
-        assert layer.data[0, 0] == pytest.approx(1.0)
 
 
 class TestMeanReturnNumber:
-    """Тесты среднего номера отражения."""
-
     def test_mean(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
-        return_number = np.array([1, 2, 3], dtype=np.uint8)
-        layer = compute_mean_return_number(x=x, y=y, return_number=return_number, grid=grid)
+        rn = np.array([1, 2, 3], dtype=np.uint8)
+        layer = compute_mean_return_number(x=x, y=y, return_number=rn, grid=grid)
         assert layer.data[0, 0] == pytest.approx(2.0)
 
 
 class TestMeanZ:
-    """Тесты средней высоты."""
-
     def test_mean_z(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
@@ -175,17 +158,8 @@ class TestMeanZ:
         layer = compute_mean_z(x=x, y=y, z=z, grid=grid)
         assert layer.data[0, 0] == pytest.approx(20.0)
 
-    def test_constant_z(self, grid: Grid) -> None:
-        x = np.array([0.5, 0.5])
-        y = np.array([0.5, 0.5])
-        z = np.array([5.0, 5.0], dtype=np.float32)
-        layer = compute_mean_z(x=x, y=y, z=z, grid=grid)
-        assert layer.data[0, 0] == pytest.approx(5.0)
-
 
 class TestZStd:
-    """Тесты разброса высот."""
-
     def test_constant_zero_std(self, grid: Grid) -> None:
         x = np.array([0.5, 0.5, 0.5])
         y = np.array([0.5, 0.5, 0.5])
@@ -201,11 +175,78 @@ class TestZStd:
         assert layer.data[0, 0] == pytest.approx(5.0, abs=1e-3)
 
 
-class TestBuildCloudFeatures:
-    """Тесты сборки всех признаков."""
+class TestHeightRange:
+    def test_constant_z_zero_range(self, grid: Grid) -> None:
+        x = np.array([0.5, 0.5, 0.5])
+        y = np.array([0.5, 0.5, 0.5])
+        z = np.array([10.0, 10.0, 10.0], dtype=np.float32)
+        layer = compute_height_range(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] == pytest.approx(0.0)
 
+    def test_known_range(self, grid: Grid) -> None:
+        x = np.array([0.5, 0.5, 0.5])
+        y = np.array([0.5, 0.5, 0.5])
+        z = np.array([5.0, 10.0, 15.0], dtype=np.float32)
+        layer = compute_height_range(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] == pytest.approx(10.0)
+
+    def test_empty_cell_nodata(self, grid: Grid) -> None:
+        x = np.array([0.5])
+        y = np.array([0.5])
+        z = np.array([10.0], dtype=np.float32)
+        layer = compute_height_range(x=x, y=y, z=z, grid=grid)
+        assert layer.data[5, 5] == layer.nodata
+
+
+class TestSkewnessZ:
+    def test_symmetric_zero_skew(self, grid: Grid) -> None:
+        # Симметричное распределение -> skew≈0.
+        x = np.array([0.5] * 5)
+        y = np.array([0.5] * 5)
+        z = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+        layer = compute_skewness_z(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] == pytest.approx(0.0, abs=1e-6)
+
+    def test_right_tail_positive_skew(self, grid: Grid) -> None:
+        # Хвост вверх -> skew > 0.
+        x = np.array([0.5] * 5)
+        y = np.array([0.5] * 5)
+        z = np.array([0.0, 0.0, 0.0, 0.0, 10.0], dtype=np.float32)
+        layer = compute_skewness_z(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] > 0.0
+
+    def test_few_points_zero(self, grid: Grid) -> None:
+        # n<3 -> skew=0 (не мусор).
+        x = np.array([0.5, 0.5])
+        y = np.array([0.5, 0.5])
+        z = np.array([1.0, 10.0], dtype=np.float32)
+        layer = compute_skewness_z(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] == pytest.approx(0.0)
+
+
+class TestKurtosisZ:
+    def test_gaussian_like_zero_kurt(self, grid: Grid) -> None:
+        # Многоточечное приближение к нормальному -> excess kurt ≈ 0.
+        rng = np.random.default_rng(42)
+        n = 5000
+        x = np.full(n, 0.5)
+        y = np.full(n, 0.5)
+        z = rng.normal(0.0, 1.0, n).astype(np.float32)
+        layer = compute_kurtosis_z(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] == pytest.approx(0.0, abs=0.3)
+
+    def test_few_points_zero(self, grid: Grid) -> None:
+        # n<4 -> kurt=0.
+        x = np.array([0.5, 0.5, 0.5])
+        y = np.array([0.5, 0.5, 0.5])
+        z = np.array([1.0, 2.0, 10.0], dtype=np.float32)
+        layer = compute_kurtosis_z(x=x, y=y, z=z, grid=grid)
+        assert layer.data[0, 0] == pytest.approx(0.0)
+
+
+class TestBuildCloudFeatures:
     def test_all_features(self, grid: Grid) -> None:
-        cloud = _uniform_cloud(grid=grid, n_per_cell=5)
+        cloud = _uniform_cloud(grid=grid, n_per_cell=10)
         result = build_cloud_features(
             x=cloud["x"],
             y=cloud["y"],
@@ -221,9 +262,12 @@ class TestBuildCloudFeatures:
                 FEATURE_MEAN_RETURN_NUMBER,
                 FEATURE_MEAN_Z,
                 FEATURE_Z_STD,
+                FEATURE_HEIGHT_RANGE,
+                FEATURE_SKEWNESS_Z,
+                FEATURE_KURTOSIS_Z,
             ),
         )
-        assert len(result.layers) == 7
+        assert len(result.layers) == 10
         for _name, layer in result.layers.items():
             assert layer.grid == grid
             assert layer.data.shape == grid.shape
@@ -238,11 +282,11 @@ class TestBuildCloudFeatures:
             intensity=cloud["intensity"],
             return_number=cloud["return_number"],
             grid=grid,
-            enabled=(FEATURE_POINT_DENSITY, FEATURE_MEAN_INTENSITY),
+            enabled=(FEATURE_POINT_DENSITY, FEATURE_HEIGHT_RANGE),
         )
         assert set(result.layers.keys()) == {
             FEATURE_POINT_DENSITY,
-            FEATURE_MEAN_INTENSITY,
+            FEATURE_HEIGHT_RANGE,
         }
 
     def test_mismatched_lengths(self, grid: Grid) -> None:

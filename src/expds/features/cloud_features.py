@@ -16,6 +16,15 @@ DTM — это одно. Но в исходном облаке есть атри
     mean_return_number        — средний номер отражения
     mean_z                    — средняя высота точек
     z_std                     — разброс высот
+    height_range              — max_z - min_z (высота «столба» точек в ячейке;
+                                прокси высоты растительности/объектов)
+    skewness_z                — асимметрия распределения Z
+    kurtosis_z                — эксцесс распределения Z
+
+Последние три — из статистики по Z в ячейке. Для растительности над
+скрытым объектом: высокая skewness (>0) = пик точек у земли и хвост
+вверх (деревья); отрицательная skewness = «висящая» структура.
+Kurtosis: острые пики (здания) vs плоское (земля).
 
 Все функции чистые: принимают массивы точек и Grid, возвращают Layer.
 Кэширование — снаружи, через LayerCache.
@@ -40,6 +49,9 @@ FEATURE_NON_FIRST_RETURN_RATIO = "non_first_return_ratio"
 FEATURE_MEAN_RETURN_NUMBER = "mean_return_number"
 FEATURE_MEAN_Z = "mean_z"
 FEATURE_Z_STD = "z_std"
+FEATURE_HEIGHT_RANGE = "height_range"
+FEATURE_SKEWNESS_Z = "skewness_z"
+FEATURE_KURTOSIS_Z = "kurtosis_z"
 
 SUPPORTED_FEATURES = (
     FEATURE_POINT_DENSITY,
@@ -49,10 +61,20 @@ SUPPORTED_FEATURES = (
     FEATURE_MEAN_RETURN_NUMBER,
     FEATURE_MEAN_Z,
     FEATURE_Z_STD,
+    FEATURE_HEIGHT_RANGE,
+    FEATURE_SKEWNESS_Z,
+    FEATURE_KURTOSIS_Z,
 )
 
 # Константы: единицы и лицензии по умолчанию.
 _DEFAULT_NODATA = -9999.0
+
+# Константы: минимальное число точек в ячейке для высших моментов.
+# Skewness/kurtosis при n<3 дают мусор (делим на n-1 и n-2).
+_MIN_POINTS_FOR_SKEW = 3
+_MIN_POINTS_FOR_KURT = 4
+# Защита от деления на ноль в std (n=1 -> std=0).
+_MIN_POINTS_FOR_STD = 2
 
 
 @dataclass(frozen=True)
@@ -115,12 +137,6 @@ def compute_point_density(
     # Пустые ячейки -> nodata.
     empty = count == 0
     density[empty] = nodata
-
-    logger.debug(
-        "point_density: max=%.2f, mean по непустым=%.2f",
-        float(density[~empty].max()) if (~empty).any() else 0.0,
-        float(density[~empty].mean()) if (~empty).any() else 0.0,
-    )
 
     return Layer(
         name=FEATURE_POINT_DENSITY,
@@ -371,6 +387,119 @@ def compute_mean_z(
     )
 
 
+def _compute_z_moments(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    grid: Grid,
+    nodata: float,
+) -> dict[str, np.ndarray]:
+    """Считает std, skewness, kurtosis, height_range по Z в ячейке.
+
+    Один проход: считаем count, sum, sum_sq, sum_cube, sum_4, min_z, max_z
+    по ячейкам. Потом собираем моменты через центральные суммы.
+
+    Формулы (biased, population):
+        var   = sum_sq/n - mean^2
+        std   = sqrt(var)
+        m3    = sum_cube/n - 3*mean*sum_sq/n + 2*mean^3
+        m4    = sum_4/n - 4*mean*sum_cube/n + 6*mean^2*sum_sq/n - 3*mean^4
+        skew  = m3 / std^3
+        kurt  = m4 / std^4 - 3  (excess kurtosis)
+
+    Для ячеек с малым count: std=0 (n<2), skew=0 (n<3), kurt=0 (n<4).
+    Для std < eps: skew=0, kurt=0 (иначе inf).
+
+    Args:
+        x, y, z: координаты точек.
+        grid: целевая сетка.
+        nodata: значение для пустых ячеек.
+
+    Returns:
+        Словарь {имя: массив} для std, skewness, kurtosis, height_range.
+    """
+    row_idx, col_idx, valid = _bin_indices(x=x, y=y, grid=grid)
+
+    count = np.zeros(grid.shape, dtype=np.int64)
+    sum1 = np.zeros(grid.shape, dtype=np.float64)
+    sum2 = np.zeros(grid.shape, dtype=np.float64)
+    sum3 = np.zeros(grid.shape, dtype=np.float64)
+    sum4 = np.zeros(grid.shape, dtype=np.float64)
+    min_z = np.full(grid.shape, np.inf, dtype=np.float64)
+    max_z = np.full(grid.shape, -np.inf, dtype=np.float64)
+
+    r = row_idx[valid]
+    c = col_idx[valid]
+    zv = z[valid].astype(np.float64)
+
+    np.add.at(count, (r, c), 1)
+    np.add.at(sum1, (r, c), zv)
+    np.add.at(sum2, (r, c), zv * zv)
+    np.add.at(sum3, (r, c), zv * zv * zv)
+    np.add.at(sum4, (r, c), zv * zv * zv * zv)
+    np.minimum.at(min_z, (r, c), zv)
+    np.maximum.at(max_z, (r, c), zv)
+
+    non_empty = count > 0
+    n = np.maximum(count.astype(np.float64), 1.0)
+    mean = np.zeros(grid.shape, dtype=np.float64)
+    mean[non_empty] = sum1[non_empty] / n[non_empty]
+
+    # std (population).
+    variance = np.zeros(grid.shape, dtype=np.float64)
+    variance[non_empty] = sum2[non_empty] / n[non_empty] - mean[non_empty] ** 2
+    variance = np.maximum(variance, 0.0)
+    std = np.sqrt(variance)
+
+    # skewness.
+    m3 = np.zeros(grid.shape, dtype=np.float64)
+    m3[non_empty] = (
+        sum3[non_empty] / n[non_empty]
+        - 3.0 * mean[non_empty] * sum2[non_empty] / n[non_empty]
+        + 2.0 * mean[non_empty] ** 3
+    )
+    skew = np.zeros(grid.shape, dtype=np.float64)
+    skew_ok = non_empty & (count >= _MIN_POINTS_FOR_SKEW) & (std > 1e-9)
+    skew[skew_ok] = m3[skew_ok] / (std[skew_ok] ** 3)
+
+    # kurtosis (excess).
+    m4 = np.zeros(grid.shape, dtype=np.float64)
+    m4[non_empty] = (
+        sum4[non_empty] / n[non_empty]
+        - 4.0 * mean[non_empty] * sum3[non_empty] / n[non_empty]
+        + 6.0 * mean[non_empty] ** 2 * sum2[non_empty] / n[non_empty]
+        - 3.0 * mean[non_empty] ** 4
+    )
+    kurt = np.zeros(grid.shape, dtype=np.float64)
+    kurt_ok = non_empty & (count >= _MIN_POINTS_FOR_KURT) & (std > 1e-9)
+    kurt[kurt_ok] = m4[kurt_ok] / (std[kurt_ok] ** 4) - 3.0
+
+    # height_range.
+    height_range = np.full(grid.shape, nodata, dtype=np.float64)
+    height_range[non_empty] = max_z[non_empty] - min_z[non_empty]
+
+    # std: для пустых -> nodata, для n<2 -> 0.
+    std_out = np.full(grid.shape, nodata, dtype=np.float64)
+    std_out[non_empty & (count >= _MIN_POINTS_FOR_STD)] = std[
+        non_empty & (count >= _MIN_POINTS_FOR_STD)
+    ]
+    # Ячейки с 1 точкой: std=0 (не nan).
+    std_out[non_empty & (count < _MIN_POINTS_FOR_STD)] = 0.0
+
+    # skewness/kurtosis: для пустых -> nodata.
+    skew_out = np.full(grid.shape, nodata, dtype=np.float64)
+    skew_out[non_empty] = skew[non_empty]
+    kurt_out = np.full(grid.shape, nodata, dtype=np.float64)
+    kurt_out[non_empty] = kurt[non_empty]
+
+    return {
+        FEATURE_Z_STD: std_out,
+        FEATURE_SKEWNESS_Z: skew_out,
+        FEATURE_KURTOSIS_Z: kurt_out,
+        FEATURE_HEIGHT_RANGE: height_range,
+    }
+
+
 def compute_z_std(
     x: np.ndarray,
     y: np.ndarray,
@@ -380,9 +509,6 @@ def compute_z_std(
 ) -> Layer:
     """Считает разброс высот по ячейке.
 
-    Высокий std = неоднородная вертикальная структура (растительность,
-    здания, сложный рельеф).
-
     Args:
         x, y, z: координаты точек.
         grid: целевая сетка.
@@ -391,40 +517,112 @@ def compute_z_std(
     Returns:
         Layer со std высот.
     """
-    row_idx, col_idx, valid = _bin_indices(x=x, y=y, grid=grid)
-
-    count = np.zeros(grid.shape, dtype=np.int64)
-    sums = np.zeros(grid.shape, dtype=np.float64)
-    sums_sq = np.zeros(grid.shape, dtype=np.float64)
-
-    r = row_idx[valid]
-    c = col_idx[valid]
-    zv = z[valid]
-
-    np.add.at(count, (r, c), 1)
-    np.add.at(sums, (r, c), zv)
-    np.add.at(sums_sq, (r, c), zv * zv)
-
-    non_empty = count > 0
-    mean = np.zeros(grid.shape, dtype=np.float64)
-    mean[non_empty] = sums[non_empty] / count[non_empty]
-
-    variance = np.zeros(grid.shape, dtype=np.float64)
-    variance[non_empty] = sums_sq[non_empty] / count[non_empty] - mean[non_empty] ** 2
-    variance = np.maximum(variance, 0.0)
-    std = np.sqrt(variance)
-
-    result = np.full(grid.shape, nodata, dtype=np.float64)
-    result[non_empty] = std[non_empty]
-
+    moments = _compute_z_moments(x=x, y=y, z=z, grid=grid, nodata=nodata)
     return Layer(
         name=FEATURE_Z_STD,
-        data=result.astype(np.float32),
+        data=moments[FEATURE_Z_STD].astype(np.float32),
         grid=grid,
         nodata=nodata,
         source="cloud",
         license="unknown",
         unit="meters",
+    )
+
+
+def compute_height_range(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    grid: Grid,
+    nodata: float = _DEFAULT_NODATA,
+) -> Layer:
+    """Считает max_z - min_z по ячейке.
+
+    Прокси высоты растительности/объектов над землёй. Для курганов
+    даёт «толщину» точки; для деревьев — высоту кроны.
+
+    Args:
+        x, y, z: координаты точек.
+        grid: целевая сетка.
+        nodata: значение для пустых ячеек.
+
+    Returns:
+        Layer с height_range.
+    """
+    moments = _compute_z_moments(x=x, y=y, z=z, grid=grid, nodata=nodata)
+    return Layer(
+        name=FEATURE_HEIGHT_RANGE,
+        data=moments[FEATURE_HEIGHT_RANGE].astype(np.float32),
+        grid=grid,
+        nodata=nodata,
+        source="cloud",
+        license="unknown",
+        unit="meters",
+    )
+
+
+def compute_skewness_z(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    grid: Grid,
+    nodata: float = _DEFAULT_NODATA,
+) -> Layer:
+    """Считает асимметрию распределения Z по ячейке.
+
+    Положительная skewness: пик точек у земли, хвост вверх (деревья,
+    кустарник). Отрицательная: «висящая» структура (мост, крыша).
+    В археологии: вал/курган с плотной растительностью дают >0.
+
+    Args:
+        x, y, z: координаты точек.
+        grid: целевая сетка.
+        nodata: значение для пустых ячеек.
+
+    Returns:
+        Layer со skewness.
+    """
+    moments = _compute_z_moments(x=x, y=y, z=z, grid=grid, nodata=nodata)
+    return Layer(
+        name=FEATURE_SKEWNESS_Z,
+        data=moments[FEATURE_SKEWNESS_Z].astype(np.float32),
+        grid=grid,
+        nodata=nodata,
+        source="cloud",
+        license="unknown",
+        unit="unitless",
+    )
+
+
+def compute_kurtosis_z(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    grid: Grid,
+    nodata: float = _DEFAULT_NODATA,
+) -> Layer:
+    """Считает эксцесс распределения Z по ячейке.
+
+    Высокий эксцесс: острые пики (здания, столбы), плоское основание.
+    Низкий (отрицательный): плоское распределение (голая земля).
+
+    Args:
+        x, y, z: координаты точек.
+        grid: целевая сетка.
+        nodata: значение для пустых ячеек.
+
+    Returns:
+        Layer с excess kurtosis.
+    """
+    moments = _compute_z_moments(x=x, y=y, z=z, grid=grid, nodata=nodata)
+    return Layer(
+        name=FEATURE_KURTOSIS_Z,
+        data=moments[FEATURE_KURTOSIS_Z].astype(np.float32),
+        grid=grid,
+        nodata=nodata,
+        source="cloud",
+        license="unknown",
+        unit="unitless",
     )
 
 
@@ -471,6 +669,22 @@ def build_cloud_features(
 
     layers: dict[str, Layer] = {}
 
+    # Признаки, требующие моментов Z, считаются одним проходом.
+    z_features_requested = [
+        name
+        for name in enabled
+        if name
+        in (
+            FEATURE_Z_STD,
+            FEATURE_HEIGHT_RANGE,
+            FEATURE_SKEWNESS_Z,
+            FEATURE_KURTOSIS_Z,
+        )
+    ]
+    z_moments: dict[str, np.ndarray] = {}
+    if z_features_requested:
+        z_moments = _compute_z_moments(x=x, y=y, z=z, grid=grid, nodata=nodata)
+
     for name in enabled:
         if name == FEATURE_POINT_DENSITY:
             layers[name] = compute_point_density(x=x, y=y, grid=grid, nodata=nodata)
@@ -493,7 +707,45 @@ def build_cloud_features(
         elif name == FEATURE_MEAN_Z:
             layers[name] = compute_mean_z(x=x, y=y, z=z, grid=grid, nodata=nodata)
         elif name == FEATURE_Z_STD:
-            layers[name] = compute_z_std(x=x, y=y, z=z, grid=grid, nodata=nodata)
+            layers[name] = Layer(
+                name=FEATURE_Z_STD,
+                data=z_moments[FEATURE_Z_STD].astype(np.float32),
+                grid=grid,
+                nodata=nodata,
+                source="cloud",
+                license="unknown",
+                unit="meters",
+            )
+        elif name == FEATURE_HEIGHT_RANGE:
+            layers[name] = Layer(
+                name=FEATURE_HEIGHT_RANGE,
+                data=z_moments[FEATURE_HEIGHT_RANGE].astype(np.float32),
+                grid=grid,
+                nodata=nodata,
+                source="cloud",
+                license="unknown",
+                unit="meters",
+            )
+        elif name == FEATURE_SKEWNESS_Z:
+            layers[name] = Layer(
+                name=FEATURE_SKEWNESS_Z,
+                data=z_moments[FEATURE_SKEWNESS_Z].astype(np.float32),
+                grid=grid,
+                nodata=nodata,
+                source="cloud",
+                license="unknown",
+                unit="unitless",
+            )
+        elif name == FEATURE_KURTOSIS_Z:
+            layers[name] = Layer(
+                name=FEATURE_KURTOSIS_Z,
+                data=z_moments[FEATURE_KURTOSIS_Z].astype(np.float32),
+                grid=grid,
+                nodata=nodata,
+                source="cloud",
+                license="unknown",
+                unit="unitless",
+            )
         else:
             raise ValueError(f"Признак '{name}' не реализован")
         logger.info("Построен признак: %s", name)
