@@ -44,3 +44,4 @@ dist/
 # Локальные заметки (только у нас)
 NOTES.local.md
 *.local.md
+*_snapshot_*.txt
