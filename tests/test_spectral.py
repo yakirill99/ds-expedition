@@ -21,6 +21,10 @@ from expds.features.spectral import (
     compute_sr,
 )
 
+# Локальные копии лимитов: если поменяем лимиты в модуле — тесты явно упадут.
+_SR_MAX_EXPECTED = 20.0
+_ARI_ABS_MAX_EXPECTED = 10.0
+
 
 @pytest.fixture()
 def grid() -> Grid:
@@ -43,16 +47,36 @@ def config() -> SpectralConfig:
         green_channel=1,
         blue_channel=2,
         nodata=-9999.0,
+        channel_std_min=0.01,
     )
 
 
+def _noisy_channel(
+    rng: np.random.Generator,
+    grid: Grid,
+    mean: float,
+    std: float = 5.0,
+) -> np.ndarray:
+    """Канал с шумом вокруг mean: std > channel_std_min.
+
+    Константный канал фильтр каналов (channel_std_min) отбросит как
+    alpha-маску. Нам нужны каналы с вариацией, иначе все индексы
+    окажутся в skipped.
+    """
+    return (mean + rng.normal(0.0, std, grid.shape)).astype(np.float32)
+
+
 def _make_channels(grid: Grid) -> dict[int, np.ndarray]:
-    """Синтетические каналы: red=100, green=150, blue=50, nir=200."""
+    """Синтетические каналы с вариацией (std > channel_std_min).
+
+    Средние значения: red≈100, green≈150, blue≈50, nir≈200.
+    """
+    rng = np.random.default_rng(42)
     return {
-        0: np.full(grid.shape, 100.0, dtype=np.float32),
-        1: np.full(grid.shape, 150.0, dtype=np.float32),
-        2: np.full(grid.shape, 50.0, dtype=np.float32),
-        3: np.full(grid.shape, 200.0, dtype=np.float32),
+        0: _noisy_channel(rng, grid, 100.0),  # red
+        1: _noisy_channel(rng, grid, 150.0),  # green
+        2: _noisy_channel(rng, grid, 50.0),  # blue
+        3: _noisy_channel(rng, grid, 200.0),  # nir
     }
 
 
@@ -104,6 +128,22 @@ class TestSr:
         sr = compute_sr(red=red, nir=nir, valid=valid, nodata=-9999.0)
         assert sr.min() >= 0.0
 
+    def test_clip_max(self, grid: Grid) -> None:
+        # NIR=255, Red=1 -> SR=255. Должен быть обрезан до _SR_MAX.
+        red = np.full(grid.shape, 1.0, dtype=np.float32)
+        nir = np.full(grid.shape, 255.0, dtype=np.float32)
+        valid = np.ones(grid.shape, dtype=bool)
+        sr = compute_sr(red=red, nir=nir, valid=valid, nodata=-9999.0)
+        np.testing.assert_allclose(sr, _SR_MAX_EXPECTED, atol=1e-5)
+
+    def test_zero_red_no_inf(self, grid: Grid) -> None:
+        # Red=0 не должен давать inf/nan.
+        red = np.zeros(grid.shape, dtype=np.float32)
+        nir = np.full(grid.shape, 200.0, dtype=np.float32)
+        valid = np.ones(grid.shape, dtype=bool)
+        sr = compute_sr(red=red, nir=nir, valid=valid, nodata=-9999.0)
+        assert np.isfinite(sr).all()
+
 
 class TestAri:
     """Тесты ARI."""
@@ -115,6 +155,22 @@ class TestAri:
         ari = compute_ari(green=green, red=red, valid=valid, nodata=-9999.0)
         # 1/100 - 1/200 = 0.005
         np.testing.assert_allclose(ari, 0.005, atol=1e-6)
+
+    def test_clip_extreme(self, grid: Grid) -> None:
+        # Green=0.001, Red=255 -> ARI «взрывается». Должен быть обрезан.
+        green = np.full(grid.shape, 0.001, dtype=np.float32)
+        red = np.full(grid.shape, 255.0, dtype=np.float32)
+        valid = np.ones(grid.shape, dtype=bool)
+        ari = compute_ari(green=green, red=red, valid=valid, nodata=-9999.0)
+        assert ari.max() <= _ARI_ABS_MAX_EXPECTED + 1e-5
+        assert ari.min() >= -_ARI_ABS_MAX_EXPECTED - 1e-5
+
+    def test_zero_green_no_inf(self, grid: Grid) -> None:
+        green = np.zeros(grid.shape, dtype=np.float32)
+        red = np.full(grid.shape, 200.0, dtype=np.float32)
+        valid = np.ones(grid.shape, dtype=bool)
+        ari = compute_ari(green=green, red=red, valid=valid, nodata=-9999.0)
+        assert np.isfinite(ari).all()
 
 
 class TestGndvi:
@@ -169,6 +225,7 @@ class TestBuildSpectral:
             green_channel=1,
             blue_channel=2,
             nodata=-9999.0,
+            channel_std_min=0.01,
         )
         channels = _make_channels(grid)
         valid = np.ones(grid.shape, dtype=bool)
@@ -190,6 +247,7 @@ class TestBuildSpectral:
             green_channel=1,
             blue_channel=2,
             nodata=-9999.0,
+            channel_std_min=0.01,
         )
         channels = _make_channels(grid)
         valid = np.ones(grid.shape, dtype=bool)
@@ -210,6 +268,7 @@ class TestBuildSpectral:
             green_channel=1,
             blue_channel=2,
             nodata=-9999.0,
+            channel_std_min=0.01,
         )
         channels = _make_channels(grid)
         valid = np.ones(grid.shape, dtype=bool)
@@ -230,6 +289,7 @@ class TestBuildSpectral:
             green_channel=1,
             blue_channel=2,
             nodata=-9999.0,
+            channel_std_min=0.01,
         )
         channels = _make_channels(grid)
         valid = np.ones(grid.shape, dtype=bool)
@@ -262,3 +322,63 @@ class TestBuildSpectral:
                 grid=grid,
                 config=config,
             )
+
+    def test_constant_nir_skips_ndvi(self, grid: Grid) -> None:
+        """Константный NIR (alpha-маска=255) не должен давать NDVI."""
+        config = SpectralConfig(
+            enabled=(INDEX_NDVI, INDEX_SR),
+            red_channel=0,
+            nir_channel=3,
+            green_channel=1,
+            blue_channel=2,
+            nodata=-9999.0,
+            channel_std_min=0.01,
+        )
+        rng = np.random.default_rng(1)
+        channels = {
+            0: rng.uniform(1, 255, grid.shape).astype(np.float32),
+            1: rng.uniform(1, 255, grid.shape).astype(np.float32),
+            2: rng.uniform(1, 255, grid.shape).astype(np.float32),
+            # NIR — константа 255 (типичный alpha).
+            3: np.full(grid.shape, 255.0, dtype=np.float32),
+        }
+        valid = np.ones(grid.shape, dtype=bool)
+        result = build_spectral_indices(
+            channels=channels,
+            valid_mask=valid,
+            grid=grid,
+            config=config,
+        )
+        assert INDEX_NDVI in result.skipped
+        assert INDEX_SR in result.skipped
+        assert result.layers == {}
+
+    def test_constant_red_skips_red_indices(self, grid: Grid) -> None:
+        """Константный Red — все red-индексы пропущены."""
+        config = SpectralConfig(
+            enabled=(INDEX_NDVI, INDEX_SR, INDEX_ARI),
+            red_channel=0,
+            nir_channel=3,
+            green_channel=1,
+            blue_channel=2,
+            nodata=-9999.0,
+            channel_std_min=0.01,
+        )
+        rng = np.random.default_rng(2)
+        channels = {
+            0: np.zeros(grid.shape, dtype=np.float32),  # Red — константа 0
+            1: rng.uniform(1, 255, grid.shape).astype(np.float32),
+            2: rng.uniform(1, 255, grid.shape).astype(np.float32),
+            3: rng.uniform(1, 255, grid.shape).astype(np.float32),
+        }
+        valid = np.ones(grid.shape, dtype=bool)
+        result = build_spectral_indices(
+            channels=channels,
+            valid_mask=valid,
+            grid=grid,
+            config=config,
+        )
+        assert INDEX_NDVI in result.skipped
+        assert INDEX_SR in result.skipped
+        assert INDEX_ARI in result.skipped
+        assert result.layers == {}

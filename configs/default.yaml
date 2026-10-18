@@ -78,12 +78,17 @@ align:
 # Спектральные индексы для оптики (NDVI, SR, ARI, GNDVI, NDWI).
 # Индексы каналов 0-based. Если nir_channel=null — NDVI/SR не строятся
 # (graceful skip для grayscale-снимков, где NIR физически отсутствует).
+#
+# channel_std_min — минимальное std канала, чтобы признать его информативным.
+# Константные каналы (alpha-маска=255, nodata-заливка) исключаются из индексов,
+# иначе NDVI/ARI на них дают мусор.
 spectral:
   enabled: [ndvi, sr, ari, gndvi, ndwi]
   red_channel: 0
   nir_channel: 3
   green_channel: 1
   blue_channel: 2
+  channel_std_min: 0.01
   nodata: -9999.0
 
 # Управление модальностями участка.

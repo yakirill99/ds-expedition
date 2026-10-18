@@ -84,6 +84,7 @@ _KEY_SPECTRAL_NIR_CHANNEL = "nir_channel"
 _KEY_SPECTRAL_GREEN_CHANNEL = "green_channel"
 _KEY_SPECTRAL_BLUE_CHANNEL = "blue_channel"
 _KEY_SPECTRAL_ENABLED = "enabled"
+_KEY_SPECTRAL_CHANNEL_STD_MIN = "channel_std_min"
 _KEY_SPECTRAL_NODATA = "nodata"
 
 _KEY_MODALITIES = "modalities"
@@ -151,6 +152,10 @@ class SpectralConfig:
     Индексы каналов — 0-based, как в rasterio (band 1 -> index 0).
     Если nir_channel is None — NDVI/SR не строятся (нет NIR).
     Если red_channel is None — ARI не строится.
+
+    channel_std_min — минимальное std канала (по валидным пикселям),
+    чтобы признать его информативным. Константные каналы (alpha-маска,
+    nodata-заливка) в индексы не идут: NDVI/ARI на них — мусор.
     """
 
     enabled: tuple[str, ...]
@@ -159,6 +164,7 @@ class SpectralConfig:
     green_channel: int | None
     blue_channel: int | None
     nodata: float
+    channel_std_min: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -313,6 +319,7 @@ def _parse_spectral(raw: dict[str, Any]) -> SpectralConfig:
         green_channel=raw.get(_KEY_SPECTRAL_GREEN_CHANNEL),
         blue_channel=raw.get(_KEY_SPECTRAL_BLUE_CHANNEL),
         nodata=float(raw.get(_KEY_SPECTRAL_NODATA, -9999.0)),
+        channel_std_min=float(raw.get(_KEY_SPECTRAL_CHANNEL_STD_MIN, 0.01)),
     )
 
 

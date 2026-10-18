@@ -29,6 +29,14 @@ scripts/prepare_raster_site.py (только растры). Одна функц�
 - Если лидара нет и растров нет — ValueError.
 - Если лидар есть, но фильтр земли отбросил всё — ValueError.
 - Если у растра нет CRS и нет UTM.json — ValueError.
+
+Фильтрация каналов:
+- Каналы, которые после ресэмплинга константны по валидным пикселям
+  (std < config.spectral.channel_std_min), считаются служебными
+  (alpha-маска, nodata-заливка) и НЕ попадают в layers/ и Sample.
+  Это защищает от «4-го канала SpOr = 255».
+- Если у растра 0 информативных каналов — модальность пропускается
+  с warning (не падаем).
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -45,10 +54,13 @@ from expds.data.raster import read_raster_meta, write_raster
 from expds.features.cloud_features import build_cloud_features
 from expds.features.config import AppConfig
 from expds.features.dtm import build_dtm
-from expds.features.grid import DataSpec, Grid, Layer, stack_layers
+from expds.features.grid import DataSpec, Grid, Layer, Sample, stack_layers
 from expds.features.ground import filter_ground
 from expds.features.relief import build_relief_layers
 from expds.features.spectral import build_spectral_indices
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +97,9 @@ _TIF_PATTERNS = ("*.tif", "*.tiff")
 # Константы: nodata для служебных масок.
 _MASK_NODATA = -1.0
 
+# Константы: порог std для признания канала информативным по умолчанию.
+_DEFAULT_CHANNEL_STD_MIN = 0.01
+
 
 @dataclass(frozen=True)
 class SiteInventory:
@@ -115,7 +130,7 @@ class SiteResult:
     """
 
     layers: dict[str, Layer]
-    sample: object  # Sample, но чтобы не тянуть импорт в dataclass
+    sample: Sample
     grid: Grid
     inventory: SiteInventory
     n_points_total: int = 0
@@ -485,60 +500,11 @@ def _grid_from_raster(path: Path, pixel_size: float, target_crs: str) -> Grid:
     return Grid.from_bounds(crs=target_crs, pixel_size=pixel_size, bounds=bounds)
 
 
-def _read_raster_channels(
-    path: Path,
-    grid: Grid,
-    nodata: float,
-) -> tuple[dict[int, np.ndarray], np.ndarray]:
-    """Читает все каналы растра и приводит к целевой сетке.
-
-    Args:
-        path: путь к GeoTIFF.
-        grid: целевая сетка.
-        nodata: значение nodata в результате.
-
-    Returns:
-        Кортеж (channels, valid_mask):
-        channels — словарь 0-based index -> 2D массив;
-        valid_mask — булева маска валидных пикселей (True = валидно).
-    """
-    import rasterio
-
-    channels: dict[int, np.ndarray] = {}
-    valid_mask = np.zeros(grid.shape, dtype=bool)
-
-    with rasterio.open(path) as src:
-        n_bands = src.count
-        src_crs = src.crs.to_string() if src.crs is not None else None
-
-    for band_idx in range(n_bands):
-        # read_raster читает только 1-й канал. Для многоканальных читаем
-        # каждый канал отдельно через _read_single_band_to_grid.
-        band_data = _read_single_band_to_grid(
-            path=path,
-            band_idx=band_idx,
-            grid=grid,
-            nodata=nodata,
-            src_crs=src_crs,
-        )
-        channels[band_idx] = band_data
-        valid_mask |= band_data != nodata
-
-    logger.info(
-        "Растр %s: %d каналов, валидных пикселей %.1f%%",
-        path.name,
-        len(channels),
-        100.0 * float(valid_mask.mean()),
-    )
-    return channels, valid_mask
-
-
 def _read_single_band_to_grid(
     path: Path,
     band_idx: int,
     grid: Grid,
     nodata: float,
-    src_crs: str | None,
 ) -> np.ndarray:
     """Читает один канал растра и ресэмплит в целевую сетку.
 
@@ -550,7 +516,6 @@ def _read_single_band_to_grid(
         band_idx: 0-based индекс канала.
         grid: целевая сетка.
         nodata: значение nodata в результате.
-        src_crs: CRS растра (для проверки).
 
     Returns:
         2D float32 массив в grid.
@@ -587,6 +552,79 @@ def _read_single_band_to_grid(
     return np.ascontiguousarray(np.flipud(destination))
 
 
+def _read_raster_channels(
+    path: Path,
+    grid: Grid,
+    nodata: float,
+    channel_std_min: float,
+) -> tuple[dict[int, np.ndarray], np.ndarray]:
+    """Читает все каналы растра, приводит к целевой сетке, отбрасывает константные.
+
+    Константные каналы (std по валидным пикселям < channel_std_min)
+    считаются служебными: alpha-маска (все 255), nodata-заливка.
+    Они не попадают в результат — модель не должна видеть их как признак.
+
+    Args:
+        path: путь к GeoTIFF.
+        grid: целевая сетка.
+        nodata: значение nodata в результате.
+        channel_std_min: порог std канала.
+
+    Returns:
+        Кортеж (channels, valid_mask):
+        channels — словарь 0-based index -> 2D массив (только информативные);
+        valid_mask — булева маска валидных пикселей (True = валидно,
+        хотя бы в одном из ВСЕХ каналов исходника).
+    """
+    import rasterio
+
+    all_channels: dict[int, np.ndarray] = {}
+    total_valid = np.zeros(grid.shape, dtype=bool)
+
+    with rasterio.open(path) as src:
+        n_bands = src.count
+
+    for band_idx in range(n_bands):
+        band_data = _read_single_band_to_grid(
+            path=path,
+            band_idx=band_idx,
+            grid=grid,
+            nodata=nodata,
+        )
+        all_channels[band_idx] = band_data
+        total_valid |= band_data != nodata
+
+    # Фильтр константных каналов.
+    channels: dict[int, np.ndarray] = {}
+    dropped: list[int] = []
+    for idx, data in all_channels.items():
+        valid = (data != nodata) & np.isfinite(data)
+        if not valid.any():
+            dropped.append(idx)
+            continue
+        std = float(np.std(data[valid].astype(np.float64)))
+        if std < channel_std_min:
+            dropped.append(idx)
+            continue
+        channels[idx] = data
+
+    if dropped:
+        logger.info(
+            "Растр %s: отброшены константные/служебные каналы: %s",
+            path.name,
+            dropped,
+        )
+
+    logger.info(
+        "Растр %s: информативных каналов %d из %d, валидных пикселей %.1f%%",
+        path.name,
+        len(channels),
+        n_bands,
+        100.0 * float(total_valid.mean()),
+    )
+    return channels, total_valid
+
+
 def _build_raster_layers(
     inventory: SiteInventory,
     config: AppConfig,
@@ -595,10 +633,17 @@ def _build_raster_layers(
     """Строит слои из растровых модальностей.
 
     Для каждой модальности:
-    - читает все каналы -> ресэмплит в общую сетку;
+    - читает все каналы -> ресэмплит в общую сетку -> отбрасывает
+      константные (alpha, nodata-заливка);
     - если это оптика (or, sp_or, ae) и есть спектральные индексы —
-      строит NDVI/SR/ARI;
+      строит NDVI/SR/ARI/GNDVI/NDWI;
     - именует слои с префиксом модальности: or_ch0, sp_or_ndvi, maggr_ch0.
+
+    Если у модальности 0 информативных каналов — модальность
+    пропускается с warning.
+
+    Если TIF одной модальности несколько — берётся первый (главный),
+    остальные игнорируются с warning (п.7: all_files — TODO).
 
     Args:
         inventory: инвентаризация участка.
@@ -609,15 +654,16 @@ def _build_raster_layers(
         Словарь имя -> Layer.
     """
     layers: dict[str, Layer] = {}
+    std_min = getattr(config.spectral, "channel_std_min", _DEFAULT_CHANNEL_STD_MIN)
 
     for modality, paths in inventory.rasters.items():
         prefix = MODALITY_PREFIX.get(modality, modality)
         # Для каждой модальности берём первый файл (главный).
-        # Дополнительные TIF с другим разрешением пока не используем.
         path = paths[0]
         if len(paths) > 1:
-            logger.info(
-                "Модальность %s: %d файлов, берём первый: %s",
+            logger.warning(
+                "Модальность %s: %d файлов, берём первый: %s. "
+                "Остальные игнорируются (all_files — TODO).",
                 modality,
                 len(paths),
                 path.name,
@@ -627,11 +673,23 @@ def _build_raster_layers(
             path=path,
             grid=grid,
             nodata=config.grid.nodata,
+            channel_std_min=std_min,
         )
 
+        if not channels:
+            logger.warning(
+                "Модальность %s (%s): нет информативных каналов, пропускаем",
+                modality,
+                path.name,
+            )
+            continue
+
         # Базовые каналы: prefix_ch0, prefix_ch1, ...
-        for idx, data in channels.items():
-            name = f"{prefix}_ch{idx}"
+        # Индексы в channels — 0-based исходного файла, но в имени слоя
+        # используем локальный порядок после фильтрации (ch0, ch1, ...),
+        # чтобы имена не «прыгали» через пропущенные alpha-каналы.
+        for local_idx, (src_idx, data) in enumerate(sorted(channels.items())):
+            name = f"{prefix}_ch{local_idx}"
             layers[name] = Layer(
                 name=name,
                 data=data,
@@ -641,6 +699,13 @@ def _build_raster_layers(
                 license="unknown",
                 unit="uint8",
             )
+            if local_idx != src_idx:
+                logger.debug(
+                    "Модальность %s: канал src=%d переименован в %s",
+                    modality,
+                    src_idx,
+                    name,
+                )
 
         # Спектральные индексы — только для оптики.
         if modality in (MODALITY_OR, MODALITY_SP_OR, MODALITY_AE):
@@ -662,6 +727,12 @@ def _build_raster_layers(
                     unit=index_layer.unit,
                 )
                 layers[renamed.name] = renamed
+            if spectral_result.skipped:
+                logger.info(
+                    "Модальность %s: спектральные индексы пропущены: %s",
+                    modality,
+                    list(spectral_result.skipped),
+                )
 
     logger.info("Растры: %d слоёв", len(layers))
     return layers
@@ -726,7 +797,7 @@ def _save_site(
     grid: Grid,
     out_dir: Path,
     nodata: float,
-) -> object:
+) -> Sample:
     """Сохраняет layers/*.tif и samples/sample.npz + sample_meta.json.
 
     Args:
@@ -826,8 +897,8 @@ def build_site(
     # 1. Лидар задаёт сетку, если есть.
     if inventory.lidar_path is not None:
         header = read_header(path=inventory.lidar_path)
-        # Границы в target_crs: читаем одну точку? Нет — bounds из header
-        # в source CRS, перепроецируем.
+        # Границы в target_crs: bounds из header в source CRS,
+        # перепроецируем.
         from pyproj import Transformer
 
         src_crs = header.crs or config.crs.source

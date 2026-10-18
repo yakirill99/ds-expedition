@@ -14,6 +14,11 @@
 индекс не строится: возвращается пустой словарь, слой не попадает
 в Sample, channel_mask=False. Это graceful skip для grayscale-снимков,
 где NIR физически отсутствует.
+
+Дополнительно: каналы с std по валидным пикселям ниже channel_std_min
+считаются константными (alpha-маска, nodata-заливка) и в индексы не идут.
+Иначе NDVI/ARI на константном канале дают мусор, который модель примет
+за сигнал.
 """
 
 from __future__ import annotations
@@ -50,13 +55,21 @@ _EPSILON = 1e-6
 _NDVI_MIN = -1.0
 _NDVI_MAX = 1.0
 
+# Константы: верхний предел SR (физически NIR/Red редко > 20).
+_SR_MAX = 20.0
+
+# Константы: верхний предел |ARI| (1/green - 1/red, при uint8-яркостях
+# разумный предел — единицы; выбросы обрезаем).
+_ARI_ABS_MAX = 10.0
+
 
 @dataclass(frozen=True)
 class SpectralResult:
     """Результат построения спектральных индексов.
 
     layers — словарь имя -> Layer, только для построенных индексов.
-    skipped — имена индексов, которые не построены (нет каналов).
+    skipped — имена индексов, которые не построены (нет каналов
+        или канал константный).
     """
 
     layers: dict[str, Layer]
@@ -152,6 +165,9 @@ def compute_sr(
 ) -> np.ndarray:
     """SR = NIR / Red. Простое отношение, чувствительное к биомассе.
 
+    SR ограничен сверху _SR_MAX: при Red→0 отношение взрывается, а для
+    модели это выброс. Клиппинг в [0, _SR_MAX].
+
     Args:
         red: канал красного.
         nir: канал ближнего инфракрасного.
@@ -159,11 +175,10 @@ def compute_sr(
         nodata: значение nodata.
 
     Returns:
-        2D float32 массив SR (>= 0), nodata в невалидных пикселях.
+        2D float32 массив SR в [0, _SR_MAX], nodata в невалидных пикселях.
     """
     sr = _safe_ratio(nir.astype(np.float64), red.astype(np.float64))
-    # SR не нормирован, но отрицательным быть не может (физически).
-    sr = np.maximum(sr, 0.0)
+    sr = np.clip(sr, 0.0, _SR_MAX)
     return _apply_valid_mask(sr, valid, nodata)
 
 
@@ -178,6 +193,9 @@ def compute_ari(
     Антоцианы указывают на стресс растений. Для археологии — косвенный
     признак нарушенного грунта/скрытых объектов.
 
+    ARI не нормирован: при яркостях, близких к 0, он взрывается.
+    Клиппинг в [-_ARI_ABS_MAX, +_ARI_ABS_MAX].
+
     Args:
         green: канал зелёного.
         red: канал красного.
@@ -190,6 +208,7 @@ def compute_ari(
     inv_green = _safe_ratio(np.ones_like(green, dtype=np.float64), green.astype(np.float64))
     inv_red = _safe_ratio(np.ones_like(red, dtype=np.float64), red.astype(np.float64))
     ari = inv_green - inv_red
+    ari = np.clip(ari, -_ARI_ABS_MAX, _ARI_ABS_MAX)
     return _apply_valid_mask(ari, valid, nodata)
 
 
@@ -240,6 +259,33 @@ def compute_ndwi(
         _normalized_difference(green.astype(np.float64), nir.astype(np.float64))
     )
     return _apply_valid_mask(ndwi, valid, nodata)
+
+
+def _is_informative(
+    channel: np.ndarray | None,
+    valid_mask: np.ndarray,
+    std_min: float,
+) -> bool:
+    """Проверяет, что канал не None и не константа по валидным пикселям.
+
+    Константные каналы — это alpha-маски (все 255), nodata-заливки
+    (все 0/-9999). Считать по ним NDVI/ARI — мусор.
+
+    Args:
+        channel: 2D массив канала или None.
+        valid_mask: булева маска валидных пикселей.
+        std_min: порог std по валидным пикселям.
+
+    Returns:
+        True, если канал информативен.
+    """
+    if channel is None:
+        return False
+    valid = valid_mask & np.isfinite(channel)
+    if not valid.any():
+        return False
+    std = float(np.std(channel[valid].astype(np.float64)))
+    return std >= std_min
 
 
 def _get_channel(
@@ -307,16 +353,28 @@ def build_spectral_indices(
     red = _get_channel(channels, config.red_channel, "red")
     nir = _get_channel(channels, config.nir_channel, "nir")
     green = _get_channel(channels, config.green_channel, "green")
-    # blue пока не используется в индексах, но оставлен в конфиге на будущее.
+    # blue в индексах не используется (оставлен на будущее — SAVI/NDBI).
+
+    std_min = config.channel_std_min
+    red_ok = _is_informative(red, valid_mask, std_min)
+    nir_ok = _is_informative(nir, valid_mask, std_min)
+    green_ok = _is_informative(green, valid_mask, std_min)
+
+    if not red_ok:
+        logger.info("Канал red неинформативен (None или константа), red-индексы пропущены")
+    if not nir_ok:
+        logger.info("Канал nir неинформативен (None или константа), NIR-индексы пропущены")
+    if not green_ok:
+        logger.info("Канал green неинформативен (None или константа), green-индексы пропущены")
 
     layers: dict[str, Layer] = {}
     skipped: list[str] = []
 
-    def _need(*arrays: np.ndarray | None) -> bool:
-        return all(a is not None for a in arrays)
+    def _need(*flags: bool) -> bool:
+        return all(flags)
 
     if INDEX_NDVI in enabled:
-        if _need(red, nir):
+        if _need(red_ok, nir_ok):
             data = compute_ndvi(red=red, nir=nir, valid=valid_mask, nodata=config.nodata)  # type: ignore[arg-type]
             layers[INDEX_NDVI] = Layer(
                 name=INDEX_NDVI,
@@ -332,7 +390,7 @@ def build_spectral_indices(
             skipped.append(INDEX_NDVI)
 
     if INDEX_SR in enabled:
-        if _need(red, nir):
+        if _need(red_ok, nir_ok):
             data = compute_sr(red=red, nir=nir, valid=valid_mask, nodata=config.nodata)  # type: ignore[arg-type]
             layers[INDEX_SR] = Layer(
                 name=INDEX_SR,
@@ -348,7 +406,7 @@ def build_spectral_indices(
             skipped.append(INDEX_SR)
 
     if INDEX_ARI in enabled:
-        if _need(green, red):
+        if _need(green_ok, red_ok):
             data = compute_ari(green=green, red=red, valid=valid_mask, nodata=config.nodata)  # type: ignore[arg-type]
             layers[INDEX_ARI] = Layer(
                 name=INDEX_ARI,
@@ -364,7 +422,7 @@ def build_spectral_indices(
             skipped.append(INDEX_ARI)
 
     if INDEX_GNDVI in enabled:
-        if _need(green, nir):
+        if _need(green_ok, nir_ok):
             data = compute_gndvi(green=green, nir=nir, valid=valid_mask, nodata=config.nodata)  # type: ignore[arg-type]
             layers[INDEX_GNDVI] = Layer(
                 name=INDEX_GNDVI,
@@ -380,7 +438,7 @@ def build_spectral_indices(
             skipped.append(INDEX_GNDVI)
 
     if INDEX_NDWI in enabled:
-        if _need(green, nir):
+        if _need(green_ok, nir_ok):
             data = compute_ndwi(green=green, nir=nir, valid=valid_mask, nodata=config.nodata)  # type: ignore[arg-type]
             layers[INDEX_NDWI] = Layer(
                 name=INDEX_NDWI,
@@ -396,6 +454,6 @@ def build_spectral_indices(
             skipped.append(INDEX_NDWI)
 
     if skipped:
-        logger.info("Пропущены индексы (нет каналов): %s", skipped)
+        logger.info("Пропущены индексы (нет каналов или канал константный): %s", skipped)
 
     return SpectralResult(layers=layers, skipped=tuple(skipped))
