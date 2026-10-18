@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +40,7 @@ from expds.models.base import BaseSegmenter
 from expds.models.checkpoint import save_checkpoint
 from expds.models.factory import build_model
 from expds.models.koz_loss import KozLoss
+from expds.tiles.augment import AugmentConfig, AugmentedDataset, warmup_hm_weight
 from expds.tiles.dataset import KozDataset, SiteData, load_site
 from expds.utils.seed import seed_everything
 
@@ -63,6 +64,7 @@ class TrainConfig:
     train_sites: tuple[str, ...] = ()
     val_sites: tuple[str, ...] = ()
     runs_dir: str = "runs"
+    augment: AugmentConfig = field(default_factory=AugmentConfig)
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> TrainConfig:
@@ -70,6 +72,8 @@ class TrainConfig:
         unknown = set(d) - {f.name for f in fields(cls)}
         if unknown:
             raise ValueError(f"train: unknown keys {sorted(unknown)}")
+        if "augment" in d:
+            d["augment"] = AugmentConfig.from_dict(d["augment"])
         for key in ("train_sites", "val_sites"):
             if key in d:
                 d[key] = tuple(str(s) for s in (d[key] or ()))
@@ -216,8 +220,9 @@ def fit(
         replacement=True,
         generator=torch.Generator().manual_seed(tc.seed),
     )
+    train_ds = AugmentedDataset(ds, tc.augment, seed=tc.seed)
     dl = DataLoader(
-        ds,
+        train_ds,
         batch_size=tc.batch_size,
         sampler=sampler,
         num_workers=tc.num_workers,
@@ -246,6 +251,10 @@ def fit(
             )
         for epoch in range(1, tc.epochs + 1):
             t0 = time.perf_counter()
+            train_ds.set_epoch(epoch)
+            loss_fn.cfg = replace(
+                loss_fn.cfg, hm_weight=warmup_hm_weight(epoch, cfg.loss.hm_weight)
+            )
             model.train()
             sums: dict[str, float] = {}
             nb = 0
