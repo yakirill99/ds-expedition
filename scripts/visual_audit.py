@@ -328,6 +328,13 @@ def zoom_one_mound(
     slrm_crop = slrm.data[row_min:row_max, col_min:col_max]
     dtm_crop = dtm.data[row_min:row_max, col_min:col_max]
 
+    # Объект может лежать вне лидарной сетки (типично: Ae-разметка
+    # покрывает весь снимок, а лидар — только его часть). Тогда
+    # срез пуст, .min()/.max() падают. Пропускаем такой объект.
+    if slrm_crop.size == 0 or dtm_crop.size == 0:
+        print(f"[{index}] {name}: вне сетки лидара, пропускаем")
+        return
+
     # Маска валидных пикселей (исключаем nodata).
     dtm_valid = dtm_crop != dtm.nodata
     slrm_valid = slrm_crop != slrm.nodata
