@@ -1,0 +1,20 @@
+"""Пример локальных настроек.
+
+Скопируйте этот файл в settings_local.py и задайте нужные значения.
+Файл settings_local.py импортируется в конце settings.py и НЕ должен
+сам импортировать settings.
+"""
+
+# DEBUG = False
+# ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+# SECRET_KEY = "your-production-secret-key"
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.postgresql",
+#         "NAME": "expds",
+#         "USER": "expds",
+#         "PASSWORD": "expds",
+#         "HOST": "localhost",
+#         "PORT": "5432",
+#     }
+# }

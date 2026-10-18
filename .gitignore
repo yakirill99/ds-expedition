@@ -40,6 +40,14 @@ Thumbs.db
 runs/
 dist/
 
+# Django
+.env
+web/db.sqlite3
+web/static_collected/
+web/media/
+web/tiles/
+web/config/settings_local.py
+
 # Локальные заметки (только у нас)
 NOTES.local.md
 *.local.md

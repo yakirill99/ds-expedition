@@ -16,20 +16,37 @@ dependencies = [
     "torchvision",
     "segmentation-models-pytorch>=0.5.0",
     "scikit-image>=0.26.0",
+    "django>=5.1",
+    "djangorestframework",
+    "django-environ",
+    "drf-spectacular",
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "pre-commit", "nbstripout"]
+dev = [
+    "pytest",
+    "ruff",
+    "pre-commit",
+    "nbstripout",
+    "pytest-django",
+    "django-debug-toolbar",
+    "mercantile>=1.2.1",
+    "pillow>=12.3.0",
+]
 
 [tool.ruff]
 line-length = 100
-extend-exclude = ["notebooks"]
+extend-exclude = ["notebooks", "web/static", "web/media", "web/**/migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+DJANGO_SETTINGS_MODULE = "web.config.settings"
+django_find_project = false
+python_files = ["test_*.py", "*_test.py"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["hatchling"]

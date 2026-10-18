@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Карта — ds-expedition</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            display: flex;
+            height: 100vh;
+        }
+        #sidebar {
+            width: 320px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-right: 1px solid #dee2e6;
+            overflow-y: auto;
+        }
+        #map { flex: 1; }
+        h1 { font-size: 1.4rem; margin-top: 0; }
+        label { display: block; margin: 16px 0 6px; font-weight: 600; }
+        select, button {
+            width: 100%;
+            padding: 10px;
+            font-size: 1rem;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+        }
+        .layer-list { margin-top: 20px; }
+        .layer-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            margin: 6px 0;
+            background: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+        }
+        .layer-item input { margin-right: 10px; }
+        .layer-item label {
+            margin: 0;
+            font-weight: normal;
+            cursor: pointer;
+        }
+        .empty { color: #6c757d; font-size: 0.95rem; margin-top: 8px; }
+        .error { color: #dc3545; font-size: 0.95rem; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h1>Карта локаций</h1>
+        <label for="location-select">Локация</label>
+        <select id="location-select">
+            <option value="">Выберите локацию...</option>
+        </select>
+
+        <div class="layer-list">
+            <label>Слои</label>
+            <div id="layers-container">
+                <p class="empty">Сначала выберите локацию</p>
+            </div>
+        </div>
+        <p id="status" class="error" style="display: none;"></p>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map', { attributionControl: false }).setView([55.75, 37.61], 5);
+
+        const locationSelect = document.getElementById('location-select');
+        const layersContainer = document.getElementById('layers-container');
+        const statusEl = document.getElementById('status');
+        let currentLayers = {};
+
+        const GEOJSON_COLORS = [
+            '#ff7800', '#0078ff', '#00c853', '#d500f9', '#00b8d4', '#ff1744'
+        ];
+
+        function showError(message) {
+            statusEl.textContent = message;
+            statusEl.style.display = 'block';
+        }
+
+        function clearError() {
+            statusEl.style.display = 'none';
+            statusEl.textContent = '';
+        }
+
+        async function loadLocations() {
+            try {
+                clearError();
+                const resp = await fetch('/viz/api/locations/');
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                data.locations.forEach(loc => {
+                    const opt = document.createElement('option');
+                    opt.value = loc.slug;
+                    opt.textContent = loc.name;
+                    locationSelect.appendChild(opt);
+                });
+            } catch (err) {
+                showError('Не удалось загрузить список локаций: ' + err.message);
+            }
+        }
+
+        async function loadLocation(slug) {
+            // Удаляем предыдущие слои с карты.
+            Object.values(currentLayers).forEach(layer => map.removeLayer(layer));
+            currentLayers = {};
+            layersContainer.innerHTML = '';
+            clearError();
+
+            if (!slug) {
+                layersContainer.innerHTML = '<p class="empty">Сначала выберите локацию</p>';
+                map.setView([55.75, 37.61], 5);
+                return;
+            }
+
+            try {
+                const resp = await fetch(`/viz/api/locations/${slug}/layers/`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+
+                map.setView(
+                    [data.location.center.lat, data.location.center.lon],
+                    data.location.zoom
+                );
+
+                if (data.layers.length === 0) {
+                    layersContainer.innerHTML = '<p class="empty">Нет доступных слоёв</p>';
+                    return;
+                }
+
+                // Радиокнопки: активен только один растровый слой.
+                let visibleRasterFound = false;
+                data.layers.forEach(layer => {
+                    if (layer.type !== 'geojson' && layer.is_visible) {
+                        if (visibleRasterFound) {
+                            layer.is_visible = false;
+                        } else {
+                            visibleRasterFound = true;
+                        }
+                    }
+                });
+
+                let geoJsonIndex = 0;
+                data.layers.forEach(layer => {
+                    const isGeoJson = layer.type === 'geojson';
+                    let mapLayer;
+
+                    if (isGeoJson) {
+                        const layerColor = GEOJSON_COLORS[geoJsonIndex % GEOJSON_COLORS.length];
+                        geoJsonIndex += 1;
+                        mapLayer = L.geoJSON(null, {
+                            style: {
+                                color: layerColor,
+                                weight: 2,
+                                opacity: 0.85,
+                                fillOpacity: 0.2,
+                            },
+                            pointToLayer: (feature, latlng) =>
+                                L.circleMarker(latlng, { radius: 6, color: layerColor }),
+                        });
+                        fetch(layer.geojson_url)
+                            .then(r => {
+                                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                                return r.json();
+                            })
+                            .then(geojson => mapLayer.addData(geojson))
+                            .catch(err => showError(`Ошибка загрузки ${layer.name}: ${err.message}`));
+                    } else {
+                        const minNativeZoom = layer.min_zoom !== null ? layer.min_zoom : 1;
+                        const maxNativeZoom = layer.max_zoom !== null ? layer.max_zoom : 22;
+                        mapLayer = L.tileLayer(layer.tile_url_template, {
+                            maxZoom: 22,
+                            minZoom: 1,
+                            minNativeZoom: minNativeZoom,
+                            maxNativeZoom: maxNativeZoom,
+                        });
+                    }
+
+                    currentLayers[layer.slug] = mapLayer;
+                    if (layer.is_visible) {
+                        mapLayer.addTo(map);
+                    }
+
+                    const div = document.createElement('div');
+                    div.className = 'layer-item';
+
+                    const input = document.createElement('input');
+                    input.id = `layer-${layer.slug}`;
+                    input.checked = layer.is_visible;
+
+                    const label = document.createElement('label');
+                    label.htmlFor = `layer-${layer.slug}`;
+                    label.textContent = layer.name;
+
+                    if (isGeoJson) {
+                        input.type = 'checkbox';
+                        input.addEventListener('change', () => {
+                            if (input.checked) {
+                                mapLayer.addTo(map);
+                            } else {
+                                map.removeLayer(mapLayer);
+                            }
+                        });
+                    } else {
+                        input.type = 'radio';
+                        input.name = 'raster-layer';
+                        input.value = layer.slug;
+                        input.addEventListener('change', () => {
+                            if (!input.checked) return;
+                            data.layers
+                                .filter(l => l.type !== 'geojson')
+                                .forEach(l => map.removeLayer(currentLayers[l.slug]));
+                            mapLayer.addTo(map);
+                        });
+                    }
+
+                    div.appendChild(input);
+                    div.appendChild(label);
+                    layersContainer.appendChild(div);
+                });
+            } catch (err) {
+                showError('Не удалось загрузить слои: ' + err.message);
+            }
+        }
+
+        locationSelect.addEventListener('change', (e) => loadLocation(e.target.value));
+
+        loadLocations();
+    </script>
+</body>
+</html>
