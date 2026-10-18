@@ -70,7 +70,7 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        const map = L.map('map').setView([55.75, 37.61], 5);
+        const map = L.map('map', { attributionControl: false }).setView([55.75, 37.61], 5);
 
         const locationSelect = document.getElementById('location-select');
         const layersContainer = document.getElementById('layers-container');
@@ -177,7 +177,6 @@
                         const minNativeZoom = layer.min_zoom !== null ? layer.min_zoom : 1;
                         const maxNativeZoom = layer.max_zoom !== null ? layer.max_zoom : 22;
                         mapLayer = L.tileLayer(layer.tile_url_template, {
-                            attribution: layer.name,
                             maxZoom: 22,
                             minZoom: 1,
                             minNativeZoom: minNativeZoom,

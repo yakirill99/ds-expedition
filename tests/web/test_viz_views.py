@@ -33,7 +33,7 @@ def test_map_page_has_valid_leaflet_script(client: Client) -> None:
     response = client.get(reverse("viz-index"))
     assert response.status_code == 200
     content = response.content.decode()
-    assert "L.map('map')" in content
+    assert "L.map('map'" in content
     assert "L.map</script>" not in content
 
 
