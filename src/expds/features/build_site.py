@@ -181,7 +181,7 @@ def _detect_modality_from_dir(dir_name: str) -> str | None:
     # Порядок важен: sp_or проверяем раньше or.
     if "spor" in name_lower or "sp_or" in name_lower:
         return MODALITY_SP_OR
-    if "_or_" in name_lower or name_lower.startswith("or_"):
+    if "or_ортофото" in name_lower or "_or_" in name_lower or name_lower.startswith("or_"):
         return MODALITY_OR
     if "_ae_" in name_lower or name_lower.startswith("ae_"):
         return MODALITY_AE
@@ -247,7 +247,10 @@ def inventory_site(
         for pattern in _TIF_PATTERNS:
             tifs.extend(sorted(subdir.rglob(pattern)))
         if tifs:
-            rasters.setdefault(modality, []).extend(tifs)
+            # Стабильный порядок: подпапка, затем имя файла.
+            # Нужно для детерминированных имён слоёв (<prefix>_<idx>_chN).
+            tifs_sorted = sorted(tifs, key=lambda p: (str(p.parent.relative_to(site_dir)), p.name))
+            rasters.setdefault(modality, []).extend(tifs_sorted)
 
     if lidar_path is None and not rasters:
         raise ValueError(
@@ -625,6 +628,95 @@ def _read_raster_channels(
     return channels, total_valid
 
 
+def _build_one_raster(
+    path: Path,
+    file_prefix: str,
+    modality: str,
+    config: AppConfig,
+    grid: Grid,
+    layers: dict[str, Layer],
+    std_min: float,
+) -> None:
+    """Строит слои из одного GeoTIFF-файла.
+
+    Используется `_build_raster_layers` для каждой модальности. Если
+    у модальности один файл — `file_prefix == prefix` (например, `sp_or`).
+    Если несколько (MagGr серый/цвет, EtGr карты разных масштабов) —
+    `file_prefix == f"{prefix}_{idx}"` (например, `maggr_0`, `maggr_1`).
+
+    Args:
+        path: путь к GeoTIFF.
+        file_prefix: префикс для имён слоёв.
+        modality: код модальности (для проверки, оптика ли это).
+        config: конфиг.
+        grid: общая сетка.
+        layers: словарь, куда добавляются слои (мутируется).
+        std_min: порог std канала.
+    """
+    channels, valid_mask = _read_raster_channels(
+        path=path,
+        grid=grid,
+        nodata=config.grid.nodata,
+        channel_std_min=std_min,
+    )
+
+    if not channels:
+        logger.warning(
+            "Файл %s модальности %s: нет информативных каналов, пропускаем",
+            path.name,
+            modality,
+        )
+        return
+
+    # Базовые каналы: <file_prefix>_ch0, <file_prefix>_ch1, ...
+    for local_idx, (src_idx, data) in enumerate(sorted(channels.items())):
+        name = f"{file_prefix}_ch{local_idx}"
+        layers[name] = Layer(
+            name=name,
+            data=data,
+            grid=grid,
+            nodata=config.grid.nodata,
+            source=str(path),
+            license="unknown",
+            unit="uint8",
+        )
+        if local_idx != src_idx:
+            logger.debug(
+                "%s: канал src=%d переименован в %s",
+                path.name,
+                src_idx,
+                name,
+            )
+
+    # Спектральные индексы — только для оптики.
+    if modality in (MODALITY_OR, MODALITY_SP_OR, MODALITY_AE):
+        spectral_result = build_spectral_indices(
+            channels=channels,
+            valid_mask=valid_mask,
+            grid=grid,
+            config=config.spectral,
+            source=str(path),
+        )
+        for index_name, index_layer in spectral_result.layers.items():
+            renamed = Layer(
+                name=f"{file_prefix}_{index_name}",
+                data=index_layer.data,
+                grid=grid,
+                nodata=config.grid.nodata,
+                source=str(path),
+                license="unknown",
+                unit=index_layer.unit,
+            )
+            layers[renamed.name] = renamed
+        if spectral_result.skipped:
+            logger.info(
+                "Файл %s (%s): спектральные индексы пропущены: %s",
+                path.name,
+                modality,
+                list(spectral_result.skipped),
+            )
+
+
 def _build_raster_layers(
     inventory: SiteInventory,
     config: AppConfig,
@@ -632,18 +724,19 @@ def _build_raster_layers(
 ) -> dict[str, Layer]:
     """Строит слои из растровых модальностей.
 
-    Для каждой модальности:
-    - читает все каналы -> ресэмплит в общую сетку -> отбрасывает
-      константные (alpha, nodata-заливка);
-    - если это оптика (or, sp_or, ae) и есть спектральные индексы —
-      строит NDVI/SR/ARI/GNDVI/NDWI;
-    - именует слои с префиксом модальности: or_ch0, sp_or_ndvi, maggr_ch0.
+    Для каждой модальности обрабатывает ВСЕ найденные файлы (не только
+    первый):
+    - MagGr может содержать «серый», «цвет», «цвет_2» — это разные слои;
+    - EtGr может содержать «карты» разных масштабов и «профили»;
+    - у оптики (or, sp_or, ae) может быть несколько тайлов одного участка.
 
-    Если у модальности 0 информативных каналов — модальность
-    пропускается с warning.
+    Имя слоя: `<prefix>_ch<N>`, если у модальности один файл;
+    `<prefix>_<file_idx>_ch<N>`, если несколько. Индексы 0-based и
+    стабильны (детерминированы порядком подпапок и имён файлов в
+    inventory_site).
 
-    Если TIF одной модальности несколько — берётся первый (главный),
-    остальные игнорируются с warning (п.7: all_files — TODO).
+    Оптика (or, sp_or, ae) дополнительно даёт спектральные индексы
+    (NDVI/SR/ARI/GNDVI/NDWI/SAVI) с суффиксом `_<index_name>`.
 
     Args:
         inventory: инвентаризация участка.
@@ -658,81 +751,17 @@ def _build_raster_layers(
 
     for modality, paths in inventory.rasters.items():
         prefix = MODALITY_PREFIX.get(modality, modality)
-        # Для каждой модальности берём первый файл (главный).
-        path = paths[0]
-        if len(paths) > 1:
-            logger.warning(
-                "Модальность %s: %d файлов, берём первый: %s. "
-                "Остальные игнорируются (all_files — TODO).",
-                modality,
-                len(paths),
-                path.name,
-            )
-
-        channels, valid_mask = _read_raster_channels(
-            path=path,
-            grid=grid,
-            nodata=config.grid.nodata,
-            channel_std_min=std_min,
-        )
-
-        if not channels:
-            logger.warning(
-                "Модальность %s (%s): нет информативных каналов, пропускаем",
-                modality,
-                path.name,
-            )
-            continue
-
-        # Базовые каналы: prefix_ch0, prefix_ch1, ...
-        # Индексы в channels — 0-based исходного файла, но в имени слоя
-        # используем локальный порядок после фильтрации (ch0, ch1, ...),
-        # чтобы имена не «прыгали» через пропущенные alpha-каналы.
-        for local_idx, (src_idx, data) in enumerate(sorted(channels.items())):
-            name = f"{prefix}_ch{local_idx}"
-            layers[name] = Layer(
-                name=name,
-                data=data,
+        for file_idx, path in enumerate(paths):
+            file_prefix = prefix if len(paths) == 1 else f"{prefix}_{file_idx}"
+            _build_one_raster(
+                path=path,
+                file_prefix=file_prefix,
+                modality=modality,
+                config=config,
                 grid=grid,
-                nodata=config.grid.nodata,
-                source=str(path),
-                license="unknown",
-                unit="uint8",
+                layers=layers,
+                std_min=std_min,
             )
-            if local_idx != src_idx:
-                logger.debug(
-                    "Модальность %s: канал src=%d переименован в %s",
-                    modality,
-                    src_idx,
-                    name,
-                )
-
-        # Спектральные индексы — только для оптики.
-        if modality in (MODALITY_OR, MODALITY_SP_OR, MODALITY_AE):
-            spectral_result = build_spectral_indices(
-                channels=channels,
-                valid_mask=valid_mask,
-                grid=grid,
-                config=config.spectral,
-                source=str(path),
-            )
-            for index_name, index_layer in spectral_result.layers.items():
-                renamed = Layer(
-                    name=f"{prefix}_{index_name}",
-                    data=index_layer.data,
-                    grid=grid,
-                    nodata=config.grid.nodata,
-                    source=str(path),
-                    license="unknown",
-                    unit=index_layer.unit,
-                )
-                layers[renamed.name] = renamed
-            if spectral_result.skipped:
-                logger.info(
-                    "Модальность %s: спектральные индексы пропущены: %s",
-                    modality,
-                    list(spectral_result.skipped),
-                )
 
     logger.info("Растры: %d слоёв", len(layers))
     return layers
