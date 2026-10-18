@@ -136,6 +136,18 @@
                     return;
                 }
 
+                // Радиокнопки: активен только один растровый слой.
+                let visibleRasterFound = false;
+                data.layers.forEach(layer => {
+                    if (layer.type !== 'geojson' && layer.is_visible) {
+                        if (visibleRasterFound) {
+                            layer.is_visible = false;
+                        } else {
+                            visibleRasterFound = true;
+                        }
+                    }
+                });
+
                 data.layers.forEach(layer => {
                     const isGeoJson = layer.type === 'geojson';
                     let mapLayer;
@@ -174,23 +186,37 @@
                     const div = document.createElement('div');
                     div.className = 'layer-item';
 
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.checked = layer.is_visible;
-                    checkbox.id = `layer-${layer.slug}`;
-                    checkbox.addEventListener('change', () => {
-                        if (checkbox.checked) {
-                            mapLayer.addTo(map);
-                        } else {
-                            map.removeLayer(mapLayer);
-                        }
-                    });
+                    const input = document.createElement('input');
+                    input.id = `layer-${layer.slug}`;
+                    input.checked = layer.is_visible;
 
                     const label = document.createElement('label');
                     label.htmlFor = `layer-${layer.slug}`;
                     label.textContent = layer.name;
 
-                    div.appendChild(checkbox);
+                    if (isGeoJson) {
+                        input.type = 'checkbox';
+                        input.addEventListener('change', () => {
+                            if (input.checked) {
+                                mapLayer.addTo(map);
+                            } else {
+                                map.removeLayer(mapLayer);
+                            }
+                        });
+                    } else {
+                        input.type = 'radio';
+                        input.name = 'raster-layer';
+                        input.value = layer.slug;
+                        input.addEventListener('change', () => {
+                            if (!input.checked) return;
+                            data.layers
+                                .filter(l => l.type !== 'geojson')
+                                .forEach(l => map.removeLayer(currentLayers[l.slug]));
+                            mapLayer.addTo(map);
+                        });
+                    }
+
+                    div.appendChild(input);
                     div.appendChild(label);
                     layersContainer.appendChild(div);
                 });

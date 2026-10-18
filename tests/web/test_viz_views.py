@@ -38,6 +38,17 @@ def test_map_page_has_valid_leaflet_script(client: Client) -> None:
 
 
 @pytest.mark.django_db
+def test_map_page_uses_radio_for_raster_layers(client: Client) -> None:
+    """Растровые слои переключаются радиокнопками, GeoJSON — чекбоксами."""
+    response = client.get(reverse("viz-index"))
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "input.type = 'radio'" in content
+    assert "input.name = 'raster-layer'" in content
+    assert "input.type = 'checkbox'" in content
+
+
+@pytest.mark.django_db
 def test_location_list_empty(client: Client) -> None:
     """API локаций возвращает пустой список, если данных нет."""
     response = client.get(reverse("viz-location-list"))
