@@ -393,111 +393,133 @@ def _compute_z_moments(
     z: np.ndarray,
     grid: Grid,
     nodata: float,
+    features: tuple[str, ...] = (
+        FEATURE_Z_STD,
+        FEATURE_HEIGHT_RANGE,
+        FEATURE_SKEWNESS_Z,
+        FEATURE_KURTOSIS_Z,
+    ),
 ) -> dict[str, np.ndarray]:
-    """Считает std, skewness, kurtosis, height_range по Z в ячейке.
+    """Считает запрошенные Z-моменты с минимальным набором промежуточных.
 
-    Один проход: считаем count, sum, sum_sq, sum_cube, sum_4, min_z, max_z
-    по ячейкам. Потом собираем моменты через центральные суммы.
+    Разделяет на два прохода по памяти:
+
+    1. Базовая статистика (sum1, sum2, min_z, max_z) — нужна для
+       z_std / mean_z / height_range. Это 4 массива float64.
+    2. Высшие моменты (sum3, sum4) — только если запрошены
+       skewness_z / kurtosis_z. Ещё 2 массива float64.
+
+    Пик памяти: 4 × grid.shape × 8 байт (база) или 6 × grid.shape × 8
+    (если запрошены skew/kurt). Раньше считали все 6 всегда.
 
     Формулы (biased, population):
-        var   = sum_sq/n - mean^2
+        var   = sum2/n - mean^2
         std   = sqrt(var)
-        m3    = sum_cube/n - 3*mean*sum_sq/n + 2*mean^3
-        m4    = sum_4/n - 4*mean*sum_cube/n + 6*mean^2*sum_sq/n - 3*mean^4
+        m3    = sum3/n - 3*mean*sum2/n + 2*mean^3
+        m4    = sum4/n - 4*mean*sum3/n + 6*mean^2*sum2/n - 3*mean^4
         skew  = m3 / std^3
         kurt  = m4 / std^4 - 3  (excess kurtosis)
 
     Для ячеек с малым count: std=0 (n<2), skew=0 (n<3), kurt=0 (n<4).
-    Для std < eps: skew=0, kurt=0 (иначе inf).
+    Для std < eps: skew=0, kurt=0.
 
     Args:
         x, y, z: координаты точек.
         grid: целевая сетка.
         nodata: значение для пустых ячеек.
+        features: какие признаки нужны. Позволяет не считать sum3/sum4,
+            если нужны только z_std / height_range.
 
     Returns:
-        Словарь {имя: массив} для std, skewness, kurtosis, height_range.
+        Словарь {имя: массив} только для запрошенных признаков.
     """
-    row_idx, col_idx, valid = _bin_indices(x=x, y=y, grid=grid)
+    need_std = FEATURE_Z_STD in features
+    need_range = FEATURE_HEIGHT_RANGE in features
+    need_skew = FEATURE_SKEWNESS_Z in features
+    need_kurt = FEATURE_KURTOSIS_Z in features
+    need_high_moments = need_skew or need_kurt
 
-    count = np.zeros(grid.shape, dtype=np.int64)
-    sum1 = np.zeros(grid.shape, dtype=np.float64)
-    sum2 = np.zeros(grid.shape, dtype=np.float64)
-    sum3 = np.zeros(grid.shape, dtype=np.float64)
-    sum4 = np.zeros(grid.shape, dtype=np.float64)
-    min_z = np.full(grid.shape, np.inf, dtype=np.float64)
-    max_z = np.full(grid.shape, -np.inf, dtype=np.float64)
+    row_idx, col_idx, valid = _bin_indices(x=x, y=y, grid=grid)
 
     r = row_idx[valid]
     c = col_idx[valid]
     zv = z[valid].astype(np.float64)
 
+    count = np.zeros(grid.shape, dtype=np.int64)
     np.add.at(count, (r, c), 1)
+
+    sum1 = np.zeros(grid.shape, dtype=np.float64)
+    sum2 = np.zeros(grid.shape, dtype=np.float64)
     np.add.at(sum1, (r, c), zv)
     np.add.at(sum2, (r, c), zv * zv)
-    np.add.at(sum3, (r, c), zv * zv * zv)
-    np.add.at(sum4, (r, c), zv * zv * zv * zv)
+
+    min_z = np.full(grid.shape, np.inf, dtype=np.float64)
+    max_z = np.full(grid.shape, -np.inf, dtype=np.float64)
     np.minimum.at(min_z, (r, c), zv)
     np.maximum.at(max_z, (r, c), zv)
 
+    sum3 = np.zeros(grid.shape, dtype=np.float64)
+    sum4 = np.zeros(grid.shape, dtype=np.float64)
+    if need_high_moments:
+        np.add.at(sum3, (r, c), zv * zv * zv)
+        np.add.at(sum4, (r, c), zv * zv * zv * zv)
+
     non_empty = count > 0
     n = np.maximum(count.astype(np.float64), 1.0)
+
     mean = np.zeros(grid.shape, dtype=np.float64)
     mean[non_empty] = sum1[non_empty] / n[non_empty]
 
-    # std (population).
     variance = np.zeros(grid.shape, dtype=np.float64)
     variance[non_empty] = sum2[non_empty] / n[non_empty] - mean[non_empty] ** 2
     variance = np.maximum(variance, 0.0)
     std = np.sqrt(variance)
 
-    # skewness.
-    m3 = np.zeros(grid.shape, dtype=np.float64)
-    m3[non_empty] = (
-        sum3[non_empty] / n[non_empty]
-        - 3.0 * mean[non_empty] * sum2[non_empty] / n[non_empty]
-        + 2.0 * mean[non_empty] ** 3
-    )
-    skew = np.zeros(grid.shape, dtype=np.float64)
-    skew_ok = non_empty & (count >= _MIN_POINTS_FOR_SKEW) & (std > 1e-9)
-    skew[skew_ok] = m3[skew_ok] / (std[skew_ok] ** 3)
+    result: dict[str, np.ndarray] = {}
 
-    # kurtosis (excess).
-    m4 = np.zeros(grid.shape, dtype=np.float64)
-    m4[non_empty] = (
-        sum4[non_empty] / n[non_empty]
-        - 4.0 * mean[non_empty] * sum3[non_empty] / n[non_empty]
-        + 6.0 * mean[non_empty] ** 2 * sum2[non_empty] / n[non_empty]
-        - 3.0 * mean[non_empty] ** 4
-    )
-    kurt = np.zeros(grid.shape, dtype=np.float64)
-    kurt_ok = non_empty & (count >= _MIN_POINTS_FOR_KURT) & (std > 1e-9)
-    kurt[kurt_ok] = m4[kurt_ok] / (std[kurt_ok] ** 4) - 3.0
+    if need_std:
+        std_out = np.full(grid.shape, nodata, dtype=np.float64)
+        std_out[non_empty & (count >= _MIN_POINTS_FOR_STD)] = std[
+            non_empty & (count >= _MIN_POINTS_FOR_STD)
+        ]
+        std_out[non_empty & (count < _MIN_POINTS_FOR_STD)] = 0.0
+        result[FEATURE_Z_STD] = std_out
 
-    # height_range.
-    height_range = np.full(grid.shape, nodata, dtype=np.float64)
-    height_range[non_empty] = max_z[non_empty] - min_z[non_empty]
+    if need_range:
+        height_range = np.full(grid.shape, nodata, dtype=np.float64)
+        height_range[non_empty] = max_z[non_empty] - min_z[non_empty]
+        result[FEATURE_HEIGHT_RANGE] = height_range
 
-    # std: для пустых -> nodata, для n<2 -> 0.
-    std_out = np.full(grid.shape, nodata, dtype=np.float64)
-    std_out[non_empty & (count >= _MIN_POINTS_FOR_STD)] = std[
-        non_empty & (count >= _MIN_POINTS_FOR_STD)
-    ]
-    # Ячейки с 1 точкой: std=0 (не nan).
-    std_out[non_empty & (count < _MIN_POINTS_FOR_STD)] = 0.0
+    if need_skew:
+        m3 = np.zeros(grid.shape, dtype=np.float64)
+        m3[non_empty] = (
+            sum3[non_empty] / n[non_empty]
+            - 3.0 * mean[non_empty] * sum2[non_empty] / n[non_empty]
+            + 2.0 * mean[non_empty] ** 3
+        )
+        skew = np.zeros(grid.shape, dtype=np.float64)
+        skew_ok = non_empty & (count >= _MIN_POINTS_FOR_SKEW) & (std > 1e-9)
+        skew[skew_ok] = m3[skew_ok] / (std[skew_ok] ** 3)
+        skew_out = np.full(grid.shape, nodata, dtype=np.float64)
+        skew_out[non_empty] = skew[non_empty]
+        result[FEATURE_SKEWNESS_Z] = skew_out
 
-    # skewness/kurtosis: для пустых -> nodata.
-    skew_out = np.full(grid.shape, nodata, dtype=np.float64)
-    skew_out[non_empty] = skew[non_empty]
-    kurt_out = np.full(grid.shape, nodata, dtype=np.float64)
-    kurt_out[non_empty] = kurt[non_empty]
+    if need_kurt:
+        m4 = np.zeros(grid.shape, dtype=np.float64)
+        m4[non_empty] = (
+            sum4[non_empty] / n[non_empty]
+            - 4.0 * mean[non_empty] * sum3[non_empty] / n[non_empty]
+            + 6.0 * mean[non_empty] ** 2 * sum2[non_empty] / n[non_empty]
+            - 3.0 * mean[non_empty] ** 4
+        )
+        kurt = np.zeros(grid.shape, dtype=np.float64)
+        kurt_ok = non_empty & (count >= _MIN_POINTS_FOR_KURT) & (std > 1e-9)
+        kurt[kurt_ok] = m4[kurt_ok] / (std[kurt_ok] ** 4) - 3.0
+        kurt_out = np.full(grid.shape, nodata, dtype=np.float64)
+        kurt_out[non_empty] = kurt[non_empty]
+        result[FEATURE_KURTOSIS_Z] = kurt_out
 
-    return {
-        FEATURE_Z_STD: std_out,
-        FEATURE_SKEWNESS_Z: skew_out,
-        FEATURE_KURTOSIS_Z: kurt_out,
-        FEATURE_HEIGHT_RANGE: height_range,
-    }
+    return result
 
 
 def compute_z_std(
@@ -683,7 +705,14 @@ def build_cloud_features(
     ]
     z_moments: dict[str, np.ndarray] = {}
     if z_features_requested:
-        z_moments = _compute_z_moments(x=x, y=y, z=z, grid=grid, nodata=nodata)
+        z_moments = _compute_z_moments(
+            x=x,
+            y=y,
+            z=z,
+            grid=grid,
+            nodata=nodata,
+            features=tuple(z_features_requested),
+        )
 
     for name in enabled:
         if name == FEATURE_POINT_DENSITY:

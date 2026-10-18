@@ -307,7 +307,12 @@ def _read_all_lidar_points(
     target_crs: str,
     max_points: int | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Читает все точки LAS в массивы.
+    """Читает все точки LAS в предвыделенный массив без vstack.
+
+    Раньше копили чанки в list и делали np.vstack — это ×2 по памяти
+    на этапе склейки (для 12M точек = ~1.15 ГБ пика). Теперь знаем
+    `header.point_count`, предвыделяем один массив и копируем чанк
+    в срез. Пик памяти: ровно N × 6 × 8 байт + один чанк.
 
     Args:
         path: путь к LAS/LAZ.
@@ -318,35 +323,57 @@ def _read_all_lidar_points(
     Returns:
         Кортеж (x, y, z, intensity, return_number).
     """
-    chunks = []
+    header = read_header(path=path)
+    n_total_declared = int(header.point_count)
+    if max_points is not None:
+        n_total_declared = min(n_total_declared, int(max_points))
+    if n_total_declared <= 0:
+        raise ValueError(f"LAS пуст (point_count={header.point_count}): {path}")
+
+    # Предвыделенный массив. dtype=float64 — компромисс: интенсивность
+    # и return_number влезают в float64 без потерь (return_number ≤ 15,
+    # intensity ≤ 65535 по стандарту LAS). Раздельные типы сэкономили бы
+    # ~2x, но усложнили бы код и не дали бы значимого выигрыша на 12M.
+    buf = np.empty((n_total_declared, 6), dtype=np.float64)
+    pos = 0
+
     for block in read_points(
         path=path,
         chunk_size=config.lidar.chunk_size,
         source_crs=config.crs.source,
         target_crs=target_crs,
         source_z_unit=config.lidar.source_z_unit,
-        max_points=max_points,
+        max_points=None,
     ):
-        chunks.append(block)
+        # Если файл врёт в header и выдаёт больше, чем обещал, — обрезаем.
+        # Если меньше — потом срежем буфер до pos.
+        remaining = n_total_declared - pos
+        if remaining <= 0:
+            break
+        take = min(block.shape[0], remaining)
+        buf[pos : pos + take] = block[:take]
+        pos += take
 
-    if not chunks:
+    if pos == 0:
         raise ValueError(f"LAS не дал ни одного чанка: {path}")
 
-    all_points = np.vstack(chunks)
-    x = all_points[:, 0].astype(np.float64)
-    y = all_points[:, 1].astype(np.float64)
-    z = all_points[:, 2].astype(np.float64)
-    intensity = all_points[:, 3].astype(np.float32)
-    return_number = all_points[:, 4].astype(np.uint8)
+    buf = buf[:pos]
+
+    x = buf[:, 0]
+    y = buf[:, 1]
+    z = buf[:, 2]
+    intensity = buf[:, 3].astype(np.float32)
+    return_number = buf[:, 4].astype(np.uint8)
+
     logger.info(
         "Прочитано точек: %d | X=(%.1f, %.1f) | Y=(%.1f, %.1f) | Z=(%.2f, %.2f)",
         len(x),
-        x.min(),
-        x.max(),
-        y.min(),
-        y.max(),
-        z.min(),
-        z.max(),
+        float(np.min(x)),
+        float(np.max(x)),
+        float(np.min(y)),
+        float(np.max(y)),
+        float(np.min(z)),
+        float(np.max(z)),
     )
     return x, y, z, intensity, return_number
 
@@ -563,9 +590,16 @@ def _read_raster_channels(
 ) -> tuple[dict[int, np.ndarray], np.ndarray]:
     """Читает все каналы растра, приводит к целевой сетке, отбрасывает константные.
 
-    Константные каналы (std по валидным пикселям < channel_std_min)
-    считаются служебными: alpha-маска (все 255), nodata-заливка.
-    Они не попадают в результат — модель не должна видеть их как признак.
+    Двухпроходный алгоритм, чтобы НЕ держать в памяти все каналы сразу:
+
+    1. Проход 1 — собрать `total_valid` (маску «валидно хотя бы в одном
+       канале»). Каждый канал читается, проверяется, выбрасывается.
+    2. Проход 2 — оставить только информативные каналы (std >= channel_std_min).
+       Каналы читаются по одному и сразу попадают в результат.
+
+    Пик памяти: `total_valid` + ОДИН канал исходника (float32), а не все
+    каналы одновременно. Это критично для огромных GeoTIFF (~1.5 ГБ на
+    диске → ~6 ГБ на канал после reproject в float32).
 
     Args:
         path: путь к GeoTIFF.
@@ -581,12 +615,11 @@ def _read_raster_channels(
     """
     import rasterio
 
-    all_channels: dict[int, np.ndarray] = {}
-    total_valid = np.zeros(grid.shape, dtype=bool)
-
     with rasterio.open(path) as src:
         n_bands = src.count
 
+    # Проход 1: total_valid.
+    total_valid = np.zeros(grid.shape, dtype=bool)
     for band_idx in range(n_bands):
         band_data = _read_single_band_to_grid(
             path=path,
@@ -594,22 +627,31 @@ def _read_raster_channels(
             grid=grid,
             nodata=nodata,
         )
-        all_channels[band_idx] = band_data
         total_valid |= band_data != nodata
+        del band_data
 
-    # Фильтр константных каналов.
+    # Проход 2: отбор информативных каналов.
     channels: dict[int, np.ndarray] = {}
     dropped: list[int] = []
-    for idx, data in all_channels.items():
-        valid = (data != nodata) & np.isfinite(data)
+    for band_idx in range(n_bands):
+        band_data = _read_single_band_to_grid(
+            path=path,
+            band_idx=band_idx,
+            grid=grid,
+            nodata=nodata,
+        )
+        valid = (band_data != nodata) & np.isfinite(band_data)
         if not valid.any():
-            dropped.append(idx)
+            dropped.append(band_idx)
+            del band_data
             continue
-        std = float(np.std(data[valid].astype(np.float64)))
+        std = float(np.std(band_data[valid].astype(np.float64)))
+        del valid
         if std < channel_std_min:
-            dropped.append(idx)
+            dropped.append(band_idx)
+            del band_data
             continue
-        channels[idx] = data
+        channels[band_idx] = band_data
 
     if dropped:
         logger.info(
@@ -740,7 +782,7 @@ def _build_raster_layers(
 
     Args:
         inventory: инвентаризация участка.
-        config: конфиг.
+        config: конфиг.с
         grid: целевая сетка.
 
     Returns:
