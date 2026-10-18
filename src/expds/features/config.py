@@ -78,6 +78,23 @@ _KEY_ALIGN_DEFAULT_METHOD = "default_method"
 _KEY_ALIGN_MAX_SHIFT = "max_shift"
 _KEY_ALIGN_CONFIDENCE_THRESHOLD = "confidence_threshold"
 
+_KEY_SPECTRAL = "spectral"
+_KEY_SPECTRAL_RED_CHANNEL = "red_channel"
+_KEY_SPECTRAL_NIR_CHANNEL = "nir_channel"
+_KEY_SPECTRAL_GREEN_CHANNEL = "green_channel"
+_KEY_SPECTRAL_BLUE_CHANNEL = "blue_channel"
+_KEY_SPECTRAL_ENABLED = "enabled"
+_KEY_SPECTRAL_CHANNEL_STD_MIN = "channel_std_min"
+_KEY_SPECTRAL_NODATA = "nodata"
+
+_KEY_MODALITIES = "modalities"
+_KEY_MODALITIES_ENABLED = "enabled"
+_KEY_MODALITIES_PRIORITY = "priority"
+
+_KEY_OUTPUT_CRS = "output_crs"
+_KEY_OUTPUT_CRS_ENABLED = "enabled"
+_KEY_OUTPUT_CRS_EPSG = "epsg"
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -92,7 +109,62 @@ class AppConfig:
     relief: ReliefConfig
     cloud_features: CloudFeaturesConfig
     align: AlignConfig
+    spectral: SpectralConfig
+    modalities: ModalitiesConfig
+    output_crs: OutputCrsConfig
     logging: LoggingConfig
+
+
+@dataclass(frozen=True)
+class OutputCrsConfig:
+    """Параметры экспорта в выходной CRS.
+
+    По регламенту хакатона координаты векторов (result.geojson) — всегда
+    EPSG:3857. Растровые слои для модели остаются в internal CRS (метры),
+    чтобы модель работала в метрических единицах. Экспорт в output_crs
+    применяется только на границе векторизации/сабмита.
+
+    enabled=False по умолчанию: перепроецировать все слои в 3857 дорого
+    и бессмысленно для модели. Включается флагом --output-crs.
+    """
+
+    enabled: bool
+    epsg: str
+
+
+@dataclass(frozen=True)
+class ModalitiesConfig:
+    """Управление модальностями участка.
+
+    enabled — какие модальности обрабатывать (li, or, sp_or, ae, maggr,
+    etgr, terfl). priority — порядок приоритета при конфликте сеток
+    (первая в списке задаёт целевую сетку).
+    """
+
+    enabled: tuple[str, ...]
+    priority: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SpectralConfig:
+    """Параметры спектральных индексов (NDVI, SR, ARI).
+
+    Индексы каналов — 0-based, как в rasterio (band 1 -> index 0).
+    Если nir_channel is None — NDVI/SR не строятся (нет NIR).
+    Если red_channel is None — ARI не строится.
+
+    channel_std_min — минимальное std канала (по валидным пикселям),
+    чтобы признать его информативным. Константные каналы (alpha-маска,
+    nodata-заливка) в индексы не идут: NDVI/ARI на них — мусор.
+    """
+
+    enabled: tuple[str, ...]
+    red_channel: int | None
+    nir_channel: int | None
+    green_channel: int | None
+    blue_channel: int | None
+    nodata: float
+    channel_std_min: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -173,7 +245,7 @@ class CrsConfig:
 
     source — в каком CRS лежат исходные данные.
     internal — CRS для внутренних расчётов (метры, без искажений).
-    output — CRS для выходных GeoJSON.
+    output — CRS для выходных GeoJSON (EPSG:3857 по регламенту).
     """
 
     source: str
@@ -224,8 +296,56 @@ def _require_mapping(data: Any, key: str) -> dict[str, Any]:
     return value
 
 
+def _optional_mapping(data: Any, key: str, default: dict[str, Any]) -> dict[str, Any]:
+    """Возвращает словарь по ключу или default, если секции нет.
+
+    Нужно для обратной совместимости: старые конфиги без новых секций
+    (spectral, modalities, output_crs) должны загружаться.
+    """
+    if key not in data:
+        return default
+    value = data[key]
+    if not isinstance(value, dict):
+        raise TypeError(f"Секция '{key}' должна быть словарём, получено {type(value)}")
+    return value
+
+
+def _parse_spectral(raw: dict[str, Any]) -> SpectralConfig:
+    """Разбирает секцию spectral с дефолтами."""
+    return SpectralConfig(
+        enabled=tuple(str(f) for f in raw.get(_KEY_SPECTRAL_ENABLED, [])),
+        red_channel=raw.get(_KEY_SPECTRAL_RED_CHANNEL),
+        nir_channel=raw.get(_KEY_SPECTRAL_NIR_CHANNEL),
+        green_channel=raw.get(_KEY_SPECTRAL_GREEN_CHANNEL),
+        blue_channel=raw.get(_KEY_SPECTRAL_BLUE_CHANNEL),
+        nodata=float(raw.get(_KEY_SPECTRAL_NODATA, -9999.0)),
+        channel_std_min=float(raw.get(_KEY_SPECTRAL_CHANNEL_STD_MIN, 0.01)),
+    )
+
+
+def _parse_modalities(raw: dict[str, Any]) -> ModalitiesConfig:
+    """Разбирает секцию modalities с дефолтами."""
+    return ModalitiesConfig(
+        enabled=tuple(str(m) for m in raw.get(_KEY_MODALITIES_ENABLED, ["li"])),
+        priority=tuple(
+            str(m) for m in raw.get(_KEY_MODALITIES_PRIORITY, ["li", "or", "sp_or", "ae"])
+        ),
+    )
+
+
+def _parse_output_crs(raw: dict[str, Any]) -> OutputCrsConfig:
+    """Разбирает секцию output_crs с дефолтами."""
+    return OutputCrsConfig(
+        enabled=bool(raw.get(_KEY_OUTPUT_CRS_ENABLED, False)),
+        epsg=str(raw.get(_KEY_OUTPUT_CRS_EPSG, "EPSG:3857")),
+    )
+
+
 def load_config(path: Path) -> AppConfig:
     """Читает YAML-конфиг и превращает его в типизированный объект.
+
+    Секции spectral, modalities, output_crs опциональны: если их нет,
+    используются дефолты (обратная совместимость со старыми конфигами).
 
     Args:
         path: путь к YAML-файлу конфигурации.
@@ -257,6 +377,10 @@ def load_config(path: Path) -> AppConfig:
     cloud_raw = _require_mapping(raw, _KEY_CLOUD_FEATURES)
     align_raw = _require_mapping(raw, _KEY_ALIGN)
     log_raw = _require_mapping(raw, _KEY_LOGGING)
+
+    spectral_raw = _optional_mapping(raw, _KEY_SPECTRAL, {})
+    modalities_raw = _optional_mapping(raw, _KEY_MODALITIES, {})
+    output_crs_raw = _optional_mapping(raw, _KEY_OUTPUT_CRS, {})
 
     dataset = DatasetConfig(
         name=str(ds_raw[_KEY_NAME]),
@@ -334,6 +458,9 @@ def load_config(path: Path) -> AppConfig:
         relief=relief,
         cloud_features=cloud_features,
         align=align,
+        spectral=_parse_spectral(spectral_raw),
+        modalities=_parse_modalities(modalities_raw),
+        output_crs=_parse_output_crs(output_crs_raw),
         logging=logging_cfg,
     )
 

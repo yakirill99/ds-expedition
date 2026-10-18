@@ -10,7 +10,8 @@ __pycache__/
 venv/
 
 # Data (не коммитим)
-/data/
+/data/*
+!/data/README.md
 *.las
 *.laz
 *.tif
@@ -43,3 +44,4 @@ dist/
 # Локальные заметки (только у нас)
 NOTES.local.md
 *.local.md
+*_snapshot_*.txt

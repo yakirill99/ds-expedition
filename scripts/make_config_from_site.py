@@ -1,7 +1,8 @@
 """Генерирует configs/dataset_<name>.yaml по структуре папки участка.
 
-Поддерживает только лидарные участки (папка La_точки с .las/.laz).
-Для растровых — пока не поддерживается.
+Поддерживает лидарные участки (папка La_точки с .las/.laz).
+CRS берётся из LAS header, если есть. Если нет — из UTM.json.
+Для растровых — не поддерживается.
 
 Использование:
     uv run python scripts/make_config_from_site.py \
@@ -140,9 +141,7 @@ def transliterate(name: str) -> str:
         "Я": "Ya",
     }
     result = "".join(table.get(ch, ch) for ch in name)
-    # Заменяем пробелы и дефисы на подчёркивания.
     result = result.replace(" ", "_").replace("-", "_")
-    # Убираем всё, кроме букв, цифр, подчёркиваний.
     result = "".join(ch for ch in result if ch.isalnum() or ch == "_")
     return result
 
@@ -157,9 +156,14 @@ def make_config(
     las_path = find_las(site)
     site_crs = read_crs(site)
     las_crs = read_las_crs(las_path)
-    if las_crs and las_crs != site_crs:
+
+    if las_crs is None:
+        # CRS в LAS не прописан — берём из UTM.json.
+        print(f"LAS без CRS. Использую CRS из UTM.json: {site_crs}")
+    elif las_crs != site_crs:
         print(f"ВНИМАНИЕ: LAS CRS = {las_crs}, UTM.json = {site_crs}. Использую LAS CRS.")
         site_crs = las_crs
+
     z_unit = detect_z_unit(las_path)
 
     if name is None:
@@ -266,14 +270,10 @@ align:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Генерирует конфиг для лидарного участка")
-    parser.add_argument(
-        "--site", type=Path, required=True, help="Папка участка (верхний уровень с UTM.json)"
-    )
-    parser.add_argument("--out", type=Path, required=True, help="Путь к выходному YAML")
-    parser.add_argument(
-        "--name", type=str, default=None, help="Имя датасета (по умолчанию имя папки)"
-    )
-    parser.add_argument("--pixel-size", type=float, default=1.0, help="Размер пикселя в метрах")
+    parser.add_argument("--site", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--name", type=str, default=None)
+    parser.add_argument("--pixel-size", type=float, default=1.0)
     args = parser.parse_args()
 
     make_config(site=args.site, out=args.out, name=args.name, pixel_size=args.pixel_size)
