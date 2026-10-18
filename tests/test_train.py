@@ -99,7 +99,8 @@ def test_fit_smoke(tmp_path):
     assert res["oracle"]["f1"] == 1.0  # GT построены той же цепочкой
     h = res["history"]
     assert len(h) == 5
-    assert h[-1]["train_loss"] < h[0]["train_loss"]
+    assert h[-1]["train_seg_dice"] < h[0]["train_seg_dice"]
+    assert h[-1]["train_seg_focal"] < h[0]["train_seg_focal"]
     assert 0.0 <= h[-1]["val_f1"] <= 1.0
     lines = (run / "log.jsonl").read_text().splitlines()
     assert len(lines) == 5 and json.loads(lines[-1])["epoch"] == 5
