@@ -28,6 +28,16 @@ def test_map_page_renders(client: Client) -> None:
 
 
 @pytest.mark.django_db
+def test_map_page_has_valid_leaflet_script(client: Client) -> None:
+    """JS-код инициализации карты не содержит случайных закрывающих тегов script."""
+    response = client.get(reverse("viz-index"))
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "L.map('map')" in content
+    assert "L.map</script>" not in content
+
+
+@pytest.mark.django_db
 def test_location_list_empty(client: Client) -> None:
     """API локаций возвращает пустой список, если данных нет."""
     response = client.get(reverse("viz-location-list"))
