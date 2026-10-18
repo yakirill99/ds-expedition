@@ -278,6 +278,18 @@ def main() -> int:
         default=None,
         help="Перепроецировать слои в указанную CRS (например, EPSG:3857)",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/default.yaml"),
+        help="Базовый конфиг (по умолчанию configs/default.yaml)",
+    )
+    parser.add_argument(
+        "--crs",
+        type=str,
+        default=None,
+        help="Переопределить crs.source для участков без CRS в данных (например, EPSG:32638)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -287,9 +299,15 @@ def main() -> int:
 
     import yaml
 
-    base_config_path = Path("configs/default.yaml")
+    base_config_path = args.config
     with base_config_path.open(encoding="utf-8") as f:
         base_config = yaml.safe_load(f)
+
+    # CRS-override — общий fallback для всех участков без CRS в данных.
+    if args.crs is not None:
+        base_config["crs"]["source"] = args.crs
+        base_config["crs"]["internal"] = args.crs
+        logger.info("CRS-override: %s", args.crs)
 
     sites = find_sites(args.data_dir)
     print(f"Найдено участков: {len(sites)}")

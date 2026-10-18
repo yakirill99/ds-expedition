@@ -88,10 +88,11 @@ inference/            entrypoint для платформы
        │                          openness, sky-view, curvature,
        │                          TPI, TRI
        │
-       ├──[features/cloud_features.py]──> 7 признаков из облака:
+       ├──[features/cloud_features.py]──> 10 признаков из облака:
        │                                  point_density, mean_intensity,
        │                                  std_intensity, non_first_return_ratio,
-       │                                  mean_return_number, mean_z, z_std
+       │                                  mean_return_number, mean_z, z_std,
+       │                                  height_range, skewness_z, kurtosis_z
        │
        └──[features/build_site.py]──> layers/*.tif + samples/sample.npz
 
@@ -175,7 +176,7 @@ samples/sample.npz + sample_meta.json
         height_range (max_z - min_z на ячейку) — прокси высоты
         растительности/объектов; skewness_z и kurtosis_z — форма
         распределения Z (растительность, здания).
-        
+
 ================================================================================
 ПАКЕТНАЯ ОБРАБОТКА УЧАСТКОВ
 ================================================================================
@@ -210,15 +211,24 @@ samples/sample.npz + sample_meta.json
         --site data/raw/013_Нора_Виннон/013_Нора_Виннон \
         --out configs/dataset_013.yaml
 
-Для растровых участков (без лидара) старый путь:
+Сгенерировать конфиг для растрового участка (SpOr/Or/Ae/MagGr/EtGr/TerFl):
+
+    uv run python scripts/make_config_from_raster_site.py \
+        --site data/raw/048_Калмыкия_1 \
+        --out configs/dataset_048.yaml
+
+Затем — build_layers.py --config configs/dataset_048.yaml, либо
+process_sites.py (он сам найдёт участок).
+
+Старый путь для растров (без лидара):
 
     uv run python scripts/prepare_raster_site.py \
         --site data/raw/048_Kalmykia \
         --out data/cache/048_Kalmykia \
         --pixel-size 1.0
 
-Новый путь (рекомендуется): process_sites.py с build_site.
-prepare_raster_site.py оставлен для обратной совместимости.
+prepare_raster_site.py оставлен для обратной совместимости; рекомендованный
+путь — make_config_from_raster_site.py + process_sites.py / build_site.
 
 
 ================================================================================

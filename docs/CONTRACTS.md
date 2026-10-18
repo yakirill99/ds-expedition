@@ -61,8 +61,8 @@
 |---|---|
 | dtm | `dtm` |
 | рельеф | `slope`, `aspect`, `hillshade_az_{int(az)}`, `slrm_sigma_{sigma}`, `positive_openness`, `negative_openness`, `sky_view_factor`, `curvature_sigma_{sigma}`, `tpi_radius_{r}`, `tri_radius_{r}` |
-| cloud | `point_density`, `mean_intensity`, `std_intensity`, `non_first_return_ratio`, `mean_return_number`, `mean_z`, `z_std` |
-| остальное | `hole_mask`, `count` (служебные), `rgb_r`, `rgb_g`, `rgb_b`, `mag` (синтетика), `or_*`, `sp_or_*`, `ae_*`, `maggr_*`, `etgr_*`, `terfl_*` (растры), спектральные индексы `*_ndvi`, `*_sr`, `*_ari`, `*_gndvi`, `*_ndwi` |
+| cloud | `point_density`, `mean_intensity`, `std_intensity`, `non_first_return_ratio`, `mean_return_number`, `mean_z`, `z_std`, `height_range`, `skewness_z`, `kurtosis_z` |
+| остальное | `hole_mask`, `count` (служебные), `rgb_r`, `rgb_g`, `rgb_b`, `mag` (синтетика), `or_*`, `sp_or_*`, `ae_*`, `maggr_*`, `etgr_*`, `terfl_*` (растры), спектральные индексы `*_ndvi`, `*_sr`, `*_ari`, `*_gndvi`, `*_ndwi`, `*_savi` |
 
 `hole_mask` и `count` **не выделяются** — идут в «остальное» по алфавиту.
 Это сохраняет контракт с ролью 5 (порядок каналов в синтетике не меняется).
@@ -118,7 +118,7 @@
 - `modalities.enabled` — какие модальности обрабатывать (li, or, sp_or, ae,
   maggr, etgr, terfl).
 - `modalities.priority` — порядок для выбора целевой сетки, если лидара нет.
-- `spectral.enabled` — какие индексы строить (ndvi, sr, ari, gndvi, ndwi).
+- `spectral.enabled` — какие индексы строить (ndvi, sr, ari, gndvi, ndwi, savi).
 - `spectral.red_channel` / `nir_channel` / `green_channel` / `blue_channel` —
   0-based индексы каналов в снимке. `None` → индекс не строится (graceful skip).
 - `spectral.channel_std_min` — минимальное std канала (по валидным пикселям),
