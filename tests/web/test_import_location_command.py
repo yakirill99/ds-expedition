@@ -54,6 +54,34 @@ def test_import_from_manifest(tiles_root: Path, location_dir: Path) -> None:
     assert "lidar" in layers
     assert "satellite" in layers
 
+    satellite = location.layers.get(slug="satellite")
+    assert satellite.min_zoom == 14
+    assert satellite.max_zoom == 14
+
+
+@pytest.mark.django_db
+def test_import_detects_zoom_range(tiles_root: Path, location_dir: Path) -> None:
+    """Команда определяет min/max zoom по папкам {z}/ внутри слоя."""
+    location_dir.mkdir()
+    manifest = {
+        "slug": "001-gnezdovo-nivlenskoe",
+        "name": "001 Гнёздово Нивленское",
+        "center": {"lat": 54.8794, "lon": 31.9719},
+        "zoom": 14,
+    }
+    (location_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    (location_dir / "tiles" / "satellite" / "13" / "0").mkdir(parents=True)
+    (location_dir / "tiles" / "satellite" / "14" / "0").mkdir(parents=True)
+    (location_dir / "tiles" / "satellite" / "16" / "0").mkdir(parents=True)
+
+    call_command("import_location", tiles_dir=str(tiles_root), stdout=StringIO())
+
+    location = Location.objects.get(slug="001-gnezdovo-nivlenskoe")
+    satellite = location.layers.get(slug="satellite")
+    assert satellite.min_zoom == 13
+    assert satellite.max_zoom == 16
+
 
 @pytest.mark.django_db
 def test_import_without_manifest(location_dir: Path, tiles_root: Path) -> None:

@@ -31,6 +31,26 @@ def _discover_tile_layers(location_dir: Path) -> list[str]:
     )
 
 
+def _discover_zoom_range(location_dir: Path, layer_slug: str) -> tuple[int | None, int | None]:
+    """Определить минимальный и максимальный зум тайлов слоя.
+
+    Сканирует папку ``{location_dir}/{layer_slug}/{z}/`` и возвращает
+    минимальный/максимальный уровень масштабирования среди числовых папок.
+    """
+    tiles_dir = location_dir / "tiles"
+    search_root = tiles_dir if tiles_dir.is_dir() else location_dir
+    layer_dir = search_root / layer_slug
+    if not layer_dir.is_dir():
+        return None, None
+
+    zooms = [
+        int(item.name) for item in layer_dir.iterdir() if item.is_dir() and item.name.isdigit()
+    ]
+    if not zooms:
+        return None, None
+    return min(zooms), max(zooms)
+
+
 def _discover_geojson_layers(location_dir: Path) -> list[tuple[str, str]]:
     """Найти GeoJSON-файлы разметки в корне папки локации.
 
@@ -140,7 +160,9 @@ class Command(BaseCommand):
                     (location_dir / "tiles") if (location_dir / "tiles").is_dir() else location_dir
                 )
                 tiles = sum(1 for _ in (search_root / layer_slug).rglob("*.png"))
-                self.stdout.write(f"  - слой {layer_slug}: {tiles} тайлов")
+                min_zoom, max_zoom = _discover_zoom_range(location_dir, layer_slug)
+                zoom_info = f" (зум {min_zoom}-{max_zoom})" if min_zoom is not None else ""
+                self.stdout.write(f"  - слой {layer_slug}: {tiles} тайлов{zoom_info}")
             for layer_slug, filename in geojson_layers:
                 self.stdout.write(f"  - векторный слой {layer_slug}: {filename}")
             return
@@ -160,6 +182,7 @@ class Command(BaseCommand):
 
         order = 0
         for layer_slug in tile_layer_slugs:
+            min_zoom, max_zoom = _discover_zoom_range(location_dir, layer_slug)
             MapLayer.objects.update_or_create(
                 location=location,
                 slug=layer_slug,
@@ -168,10 +191,13 @@ class Command(BaseCommand):
                     "layer_type": options["layer_type"],
                     "order": order,
                     "geojson_url": "",
+                    "min_zoom": min_zoom,
+                    "max_zoom": max_zoom,
                 },
             )
             sample = TilePath(location_slug=slug, layer_slug=layer_slug, z=0, x=0, y=0)
-            self.stdout.write(f"  - слой {layer_slug} -> {storage.tile_url(sample)}...")
+            zoom_info = f" (зум {min_zoom}-{max_zoom})" if min_zoom is not None else ""
+            self.stdout.write(f"  - слой {layer_slug}{zoom_info} -> {storage.tile_url(sample)}...")
             order += 1
 
         for idx, (_, filename) in enumerate(geojson_layers, start=1):

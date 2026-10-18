@@ -167,10 +167,14 @@
                             .then(geojson => mapLayer.addData(geojson))
                             .catch(err => showError(`Ошибка загрузки ${layer.name}: ${err.message}`));
                     } else {
+                        const minNativeZoom = layer.min_zoom !== null ? layer.min_zoom : 1;
+                        const maxNativeZoom = layer.max_zoom !== null ? layer.max_zoom : 22;
                         mapLayer = L.tileLayer(layer.tile_url_template, {
                             attribution: layer.name,
                             maxZoom: 22,
-                            minZoom: 1
+                            minZoom: 1,
+                            minNativeZoom: minNativeZoom,
+                            maxNativeZoom: maxNativeZoom,
                         });
                     }
 

@@ -108,6 +108,8 @@ def location_layers(request, location_slug: str):
             item["tile_url_template"] = _raster_tile_url_template(
                 storage, location.slug, layer.slug
             )
+            item["min_zoom"] = layer.min_zoom
+            item["max_zoom"] = layer.max_zoom
         layers.append(item)
 
     return JsonResponse(

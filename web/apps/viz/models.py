@@ -52,6 +52,11 @@ class MapLayer(models.Model):
     order = models.PositiveSmallIntegerField("Порядок", default=0)
     is_visible = models.BooleanField("Видим по умолчанию", default=True)
 
+    # Диапазон доступных масштабов тайлов (только для растровых слоёв).
+    # Определяется автоматически при импорте по фактическим папкам {z}/.
+    min_zoom = models.PositiveSmallIntegerField("Минимальный зум", null=True, blank=True)
+    max_zoom = models.PositiveSmallIntegerField("Максимальный зум", null=True, blank=True)
+
     # Для векторных слоёв (GeoJSON)
     geojson_url = models.CharField("URL GeoJSON", max_length=500, blank=True)
 

@@ -72,6 +72,8 @@ def test_location_layers(client: Client) -> None:
         slug="satellite",
         layer_type="satellite",
         order=0,
+        min_zoom=13,
+        max_zoom=16,
     )
 
     response = client.get(reverse("viz-location-layers", args=[location.slug]))
@@ -79,10 +81,10 @@ def test_location_layers(client: Client) -> None:
     data = response.json()
     assert data["location"]["slug"] == "test-location"
     assert len(data["layers"]) == 1
-    assert (
-        "/viz/tiles/test-location/satellite/{z}/{x}/{y}.png"
-        in data["layers"][0]["tile_url_template"]
-    )
+    layer = data["layers"][0]
+    assert "/viz/tiles/test-location/satellite/{z}/{x}/{y}.png" in layer["tile_url_template"]
+    assert layer["min_zoom"] == 13
+    assert layer["max_zoom"] == 16
 
 
 @pytest.mark.django_db
