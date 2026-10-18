@@ -289,6 +289,23 @@ class TestBuildCloudFeatures:
             FEATURE_HEIGHT_RANGE,
         }
 
+    def test_subset_includes_mean_intensity(self, grid: Grid) -> None:
+        """mean_intensity в сборке не теряется при частичном enabled."""
+        cloud = _uniform_cloud(grid=grid, n_per_cell=5)
+        result = build_cloud_features(
+            x=cloud["x"],
+            y=cloud["y"],
+            z=cloud["z"],
+            intensity=cloud["intensity"],
+            return_number=cloud["return_number"],
+            grid=grid,
+            enabled=(FEATURE_MEAN_INTENSITY, FEATURE_Z_STD),
+        )
+        assert set(result.layers.keys()) == {
+            FEATURE_MEAN_INTENSITY,
+            FEATURE_Z_STD,
+        }
+
     def test_mismatched_lengths(self, grid: Grid) -> None:
         with pytest.raises(ValueError, match="Длины"):
             build_cloud_features(

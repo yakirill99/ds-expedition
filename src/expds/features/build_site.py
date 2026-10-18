@@ -783,6 +783,9 @@ def _order_channel_names(names: list[str]) -> list[str]:
         "mean_return_number",
         "mean_z",
         "z_std",
+        "height_range",
+        "skewness_z",
+        "kurtosis_z",
     )
     cloud = sorted(n for n in names if any(n.startswith(p) for p in cloud_prefixes))
     ordered.extend(cloud)
