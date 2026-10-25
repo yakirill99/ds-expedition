@@ -1,0 +1,180 @@
+# ============================================================
+# AHN (Actueel Hoogtebestand Nederland) — внешний датасет для валидации
+# ============================================================
+# Задача: прогнать train/predict/eval БЕЗ правок кода — только этот YAML.
+#
+# Почему AHN: плотный открытый лидар (8-10 точек/м²) с известными
+# археологическими объектами. Проверяет, что пайплайн не завязан на
+# синтетику и на раскладку организаторов.
+#
+# Формат = формат костяка (configs/dataset_synthetic.yaml):
+#   data / targets / tiles — обязательны, остальное по умолчанию.
+# Блоки layers/sites читает expds.spec.load_spec, pipeline_config их игнорирует.
+#
+# Данные вне git. Подготовка:
+#   1. Скачать листы AHN (GeoTIFF DTM/DSM 0.5 м) в data/ahn/raw/<site_id>/
+#   2. uv run python scripts/build_layers.py --config configs/dataset_ahn.yaml
+#   3. Разметку положить как data/ahn/raw/<site_id>/labels.geojson (EPSG:3857)
+# ============================================================
+
+
+data:
+  sites_dir: data/ahn/raw
+  labels_file: labels.geojson
+  # Порядок = контракт модели (сохраняется в чекпоинт).
+  # У AHN нет магнитометрии и RGB — эти каналы отсутствуют,
+  # stack_layers заполнит нулями и снимет channel_mask.
+  channels:
+    - dtm
+    - slope
+    - hillshade_az_45
+    - hillshade_az_135
+    - hillshade_az_225
+    - hillshade_az_315
+    - slrm_sigma_8.0
+    - positive_openness
+    - negative_openness
+    - sky_view_factor
+    - curvature_sigma_2.0
+    - tpi_radius_5
+    - tri_radius_3
+    - point_density
+    - mean_intensity
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
+  normalize: site_robust
+  labels_crs: EPSG:3857
+
+
+targets:
+  classes: [mound, rampart, ditch]
+  # AHN 0.5 м/px: курганы 10-20 м -> сигма меньше, чем на метровой сетке.
+  heatmap_sigma_px: 4.0
+
+
+tiles:
+  # 512 делится на 32 (input_divisor для unet).
+  tile_px: 512
+  overlap_px: 128
+  pos_fraction: 0.7
+
+
+model:
+  arch: unet
+  encoder: resnet34   # encoder_weights всегда None (офлайн)
+  prior_prob: 0.01
+
+
+loss:
+  seg_weight: 1.0
+  hm_weight: 1.0
+  dice_weight: 0.5
+  focal_weight: 0.5
+  # Масса гауссианы 2*pi*sigma^2 ~ 100 при sigma=4; объектов на участке десятки.
+  # Порог 50 даёт hm-лосс в сотнях на старте и ломает seg-голову (проверено
+  # на синтетике: val F1 0.63 против 0.94). Нормируем с запасом.
+  hm_min_norm: 2000.0
+  smooth: 1.0
+
+
+stitch:
+  window: hann
+  eps: 0.001
+
+
+post:
+  seg_thr: 0.5
+  min_area_px: 64       # 0.5 м/px: 64 px ~ 16 м², мелочь отсекаем
+  simplify_px: 1.0
+  hm_thr: 0.3
+  peak_window_px: 11
+  point_radius_px: 8.0  # 4 м в пикселях сетки 0.5 м
+  point_vertices: 16
+  nms_radius_px: 24.0
+  max_detections: 2000
+
+
+eval:
+  iou_thr: 0.5
+  # Метрика считается в EPSG:3857. r_tol в единицах CRS: на широте
+  # Нидерландов (~52°) множитель 3857 ~ 1.62, то есть 15 единиц ~ 9 м.
+  # Если регламент задаёт допуск в метрах — переключить r_tol_units.
+  r_tol: 15.0
+  r_tol_units: crs
+  iou_samples: 128
+  class_agnostic: false
+
+
+train:
+  epochs: 25
+  batch_size: 4         # 512 px и 19 каналов: больше не влезает в 12 ГБ
+  lr: 0.001
+  weight_decay: 0.0001
+  amp: true
+  device: auto
+  num_workers: 4
+  seed: 0
+  tiles_per_epoch: 512
+  # Пространственный сплит: участки целиком, не тайлы.
+  # Тайлы одного участка коррелированы — разделение по тайлам
+  # завышает метрику. Заполнить после инвентаризации данных:
+  #   uv run python scripts/inventory.py --config configs/dataset_ahn.yaml
+  train_sites: []
+  val_sites: []
+  runs_dir: runs
+  augment:
+    hflip_p: 0.5
+    vflip_p: 0.5
+    rot90_p: 0.5
+    channel_dropout_p: 0.1
+
+
+# ============================================================
+# Реестр слоёв (читает expds.spec.load_spec)
+# group: relief | optic | geo     kind: raster | pointcloud
+# ============================================================
+
+
+layers:
+  - name: dtm
+    group: relief
+    glob: "dtm.tif"
+    kind: raster
+    optional: false
+  - name: dsm
+    group: relief
+    glob: "dsm.tif"
+    kind: raster
+    optional: true
+  - name: hillshade
+    group: relief
+    glob: "hillshade*.tif"
+    kind: raster
+    optional: true
+  - name: points
+    group: relief
+    glob: "*.laz"
+    kind: pointcloud
+    optional: true
+
+
+# ============================================================
+# Участки (читает expds.spec.load_spec)
+# ============================================================
+# ВАЖНО: load_spec падает, пока данных нет на диске — обязательный слой
+# dtm проверяется по glob. Это ожидаемое поведение (как в dataset_real.yaml):
+# сначала скачать листы, потом инвентаризация.
+#
+# site_id = имя подкаталога в data/ahn/raw/ и имя листа AHN (bladindex).
+# Заменить на реально скачанные листы.
+# grid: null => вывести из первого растра на диске.
+# ============================================================
+
+
+sites:
+  - site_id: ahn_site_1
+    grid: null
+  - site_id: ahn_site_2
+    grid: null
