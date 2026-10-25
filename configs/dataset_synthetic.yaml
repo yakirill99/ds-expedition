@@ -240,7 +240,7 @@ loss:
   focal_alpha: 0.25
   focal_gamma: 2.0
   hm_beta: 2.0
-  hm_min_norm: 50.0
+  hm_min_norm: 2000.0
   smooth: 1.0
 
 stitch:
@@ -266,13 +266,13 @@ eval:
   class_agnostic: false
 
 train:
-  epochs: 10
+  epochs: 12
   batch_size: 8
   lr: 0.001
   weight_decay: 0.0001
   amp: true
   device: auto
-  num_workers: 2
+  num_workers: 4
   seed: 0
   tiles_per_epoch: 512
   train_sites: [site_1, site_2]
