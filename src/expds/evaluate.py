@@ -12,6 +12,12 @@
 
 Без --config используются дефолты EvalConfig. CRS предсказаний и разметки
 должны совпадать (по регламенту EPSG:3857) — метрика не перепроецирует.
+
+Дополнительно:
+    --validate   — сначала прогнать валидатор формата платформы по --pred;
+                   при проблемах напечатать их и выйти с кодом 2;
+    --errors F   — сохранить FP/FN с типами (duplicate, localization, ...)
+                   в GeoJSON F для QGIS.
 """
 
 from __future__ import annotations
@@ -19,18 +25,24 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from expds.eval.metric import ALL, EvalConfig, MatchResult, evaluate_files
+from expds.eval.errors import analyze_errors, errors_to_geojson, format_error_report
+from expds.eval.metric import ALL, EvalConfig, MatchResult, evaluate, read_objects
+from expds.eval.validate import validate_submission
 
 logger = logging.getLogger(__name__)
 
 #: Порядок колонок отчёта.
 COLUMNS = ("tp", "fp", "fn", "precision", "recall", "f1")
+
+#: Код выхода при провале --validate.
+EXIT_INVALID = 2
 
 
 def eval_config_from_yaml(path: Path | None) -> EvalConfig:
@@ -103,12 +115,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--r-tol-units", choices=["crs", "meters"], help="единицы r_tol")
     ap.add_argument("--class-agnostic", action="store_true", help="игнорировать классы")
     ap.add_argument("--json", type=Path, help="куда сохранить отчёт в JSON")
+    ap.add_argument(
+        "--validate", action="store_true", help=f"валидатор формата; провал -> выход {EXIT_INVALID}"
+    )
+    ap.add_argument("--errors", type=Path, help="FP/FN с типами в GeoJSON (для QGIS)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     for path in (args.pred, args.gt):
         if not path.is_file():
             ap.error(f"файл не найден: {path}")
+
+    if args.validate:
+        problems = validate_submission(args.pred, args.crs, args.class_key)
+        if problems:
+            print("Формат платформы не пройден:", file=sys.stderr)
+            for p in problems:
+                print(f"  {p}", file=sys.stderr)
+            return EXIT_INVALID
+        logger.info("формат платформы: OK (%s)", args.pred)
 
     cfg = eval_config_from_yaml(args.config)
     overrides = {
@@ -126,8 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         # replace минует from_dict, поэтому валидируем явно
         cfg = EvalConfig.from_dict({**asdict(cfg), **overrides})
 
-    results = evaluate_files(args.pred, args.gt, cfg, args.crs, args.class_key)
+    preds = read_objects(args.pred, args.crs, args.class_key)
+    gts = read_objects(args.gt, args.crs, args.class_key)
+    results = evaluate(preds, gts, cfg)
     print(format_report(results))
+
+    if args.errors:
+        report = analyze_errors(preds, gts, results[ALL], cfg)
+        n = errors_to_geojson(args.errors, preds, gts, report, args.crs, args.class_key)
+        logger.info("FP/FN (%d объектов) -> %s", n, args.errors)
+        print(format_error_report(report))
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

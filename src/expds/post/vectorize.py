@@ -1,10 +1,16 @@
 """Карты вероятностей (2K, H, W) -> Detection-полигоны в crs.internal.
 
 seg-голова: порог -> 8-связные компоненты -> контур по вероятности на уровне порога
-(субпиксельно, skimage.find_contours) -> Дуглас-Пекер -> мир. Дыры пока отбрасываются.
-Кольца Detection — без замыкающей точки (контракт io.geojson), CCW.
+(субпиксельно, skimage.find_contours) -> Дуглас-Пекер -> мир. Дыры сохраняются:
+внутренние контуры (обходят низ значений — знак площади противоположен внешнему)
+попадают в Detection.holes. Кольца Detection — без замыкающей точки
+(контракт io.geojson): внешнее CCW, дыры CW.
 hm-голова: локальные максимумы -> субпиксельное уточнение (парабола по log) -> круг.
 Координаты по контракту Grid: row 0 = юг, центр пикселя x = x_min + (col + 0.5) * ps.
+
+Marching squares оставлен в skimage (BSD-3): совместимо по лицензии, выверено,
+и даёт субпиксельные уровневые линии из коробки — своя реализация на время
+хакатона не даёт выигрыша в качестве (обоснование в PR 02-post-vector).
 """
 
 from __future__ import annotations
@@ -118,11 +124,42 @@ def _ccw(ring: np.ndarray) -> np.ndarray:
     return ring[::-1].copy() if _signed_area(ring) < 0 else ring
 
 
+def _cw(ring: np.ndarray) -> np.ndarray:
+    return ring[::-1].copy() if _signed_area(ring) > 0 else ring
+
+
+def _component_holes(
+    contours: Sequence[np.ndarray],
+    outer: np.ndarray,
+    r0: int,
+    c0: int,
+    grid: Grid,
+    cfg: PostConfig,
+) -> tuple[np.ndarray, ...]:
+    """Дыры одной компоненты: контуры с ориентацией, противоположной внешнему.
+
+    В sub обнулены чужие компоненты, поэтому любой внутренний контур обходит
+    низ значений внутри этой же компоненты — то есть дыру. Дыры тоже
+    упрощаются и переводятся в мир (CW, без замыкающей точки).
+    """
+    outer_sign = np.sign(_signed_area(outer))
+    holes: list[np.ndarray] = []
+    for contour in contours:
+        if contour is outer or np.sign(_signed_area(contour)) == outer_sign:
+            continue
+        rc = contour + np.array([r0 - 1, c0 - 1], dtype=np.float64)
+        rc = simplify_ring(rc, cfg.simplify_px)
+        if len(rc) < 4:
+            continue
+        holes.append(_cw(_pix_to_world(rc[:-1], grid)))
+    return tuple(holes)
+
+
 # --- seg-голова ----------------------------------------------------------------
 
 
 def seg_to_polygons(prob: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> list[Detection]:
-    """(H, W) вероятность одного класса -> полигоны компонент (внешний контур, CCW)."""
+    """(H, W) вероятность одного класса -> полигоны компонент (внешний CCW + дыры CW)."""
     h, w = prob.shape
     lab, n = ndimage.label(prob >= cfg.seg_thr, structure=_EIGHT)
     dets: list[Detection] = []
@@ -146,8 +183,11 @@ def seg_to_polygons(prob: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> 
         if len(rc) < 4:
             continue
         ring = _ccw(_pix_to_world(rc[:-1], grid))
+        holes = _component_holes(contours, outer, r0, c0, grid, cfg)
         score = float(prob[sl][comp].mean())
-        dets.append(Detection(cls=cls, score=score, geom_type="Polygon", geometry=ring))
+        dets.append(
+            Detection(cls=cls, score=score, geom_type="Polygon", geometry=ring, holes=holes)
+        )
     return dets
 
 

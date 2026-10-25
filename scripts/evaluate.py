@@ -2,6 +2,9 @@
 
 uv run python scripts/evaluate.py --pred pred.geojson --gt labels.geojson \
     --config configs/dataset_real.yaml --json runs/report.json
+
+Флаги --validate (валидатор формата платформы) и --errors (FP/FN в GeoJSON
+для QGIS) описаны в expds.evaluate.
 """
 
 import sys
