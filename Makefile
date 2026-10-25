@@ -1,4 +1,4 @@
-.PHONY: data setup lint test test-web train predict submit runserver migrate makemigrations collectstatic djcheck
+.PHONY: data setup lint test test-web train predict evaluate submit runserver migrate makemigrations collectstatic djcheck
 setup:
 	uv sync --all-groups && uv run pre-commit install
 lint:
@@ -12,6 +12,8 @@ train:
 	uv run python scripts/train.py --config configs/baseline.yaml
 predict:
 	uv run python scripts/predict.py --config configs/baseline.yaml
+evaluate:
+	uv run python scripts/evaluate.py --pred $(PRED) --gt $(GT) --config $(CONFIG)
 submit:
 	uv run python scripts/make_submission.py --config configs/baseline.yaml
 data:
