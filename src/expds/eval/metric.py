@@ -86,7 +86,7 @@ class EvalObject:
 
 
 def objects_from_detections(dets: Iterable[Detection]) -> list[EvalObject]:
-    return [EvalObject(d.cls, d.geom_type, (d.geometry,), float(d.score)) for d in dets]
+    return [EvalObject(d.cls, d.geom_type, (d.geometry, *d.holes), float(d.score)) for d in dets]
 
 
 def objects_from_labels(

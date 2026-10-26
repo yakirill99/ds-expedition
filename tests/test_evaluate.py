@@ -234,3 +234,40 @@ def test_regulation_r_tol_units_meters_scales_with_latitude(tmp_path):
     main(["--pred", str(pred), "--gt", str(gt), "--r-tol", "5",
           "--r-tol-units", "meters", "--json", str(meters)])  # fmt: skip
     assert json.loads(meters.read_text(encoding="utf-8"))["total"]["tp"] == 1
+
+
+# --- валидатор формата ---------------------------------------------------------
+
+
+def test_cli_validate_accepts_valid(tmp_path):
+    """Валидный файл проходит --validate и метрика считается как обычно."""
+    gt = _write(tmp_path / "gt.geojson", [_feat("mound", _ring(0, 0, 20))])
+    pred = _write(tmp_path / "pred.geojson", [_feat("mound", _ring(0, 0, 20))])
+    assert main(["--pred", str(pred), "--gt", str(gt), "--validate"]) == 0
+
+
+def test_cli_validate_rejects_bad(tmp_path, capsys):
+    """Невалидный файл: --validate печатает проблемы в stderr и выходит с кодом 2."""
+    gt = _write(tmp_path / "gt.geojson", [_feat("mound", _ring(0, 0, 20))])
+    pred = tmp_path / "bad.geojson"
+    pred.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {},
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[0, 0], [1, 1]],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["--pred", str(pred), "--gt", str(gt), "--validate"]) == 2
+    err = capsys.readouterr().err
+    assert "не пройден" in err and "LineString" in err

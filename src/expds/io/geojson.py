@@ -76,6 +76,37 @@ def _strip_closing(ring: np.ndarray) -> np.ndarray:
     return ring
 
 
+def ring_signed_area(ring: np.ndarray) -> float:
+    """Ориентированная площадь кольца (шнурование), замыкание не обязательно.
+
+    > 0 — против часовой (CCW) в системе x вправо, y вверх.
+    """
+    ring = np.asarray(ring, dtype=np.float64)
+    if len(ring) < 3:
+        return 0.0
+    x, y = ring[:, 0] - ring[0, 0], ring[:, 1] - ring[0, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y))
+
+
+def polygon_rings_to_coords(rings: Iterable[np.ndarray], *, exterior_ccw: bool = True) -> list[Any]:
+    """Кольца [внешнее, *дыры] -> координаты GeoJSON Polygon.
+
+    Каждое кольцо замыкается; ориентация по RFC 7946: внешнее CCW, дыры CW
+    (независимо от ориентации на входе — это контракт только внутри пайплайна).
+    """
+    out: list[Any] = []
+    for i, ring in enumerate(rings):
+        pts = np.asarray(ring, dtype=np.float64)
+        area = ring_signed_area(pts)
+        want_ccw = exterior_ccw if i == 0 else not exterior_ccw
+        if (area < 0.0) if want_ccw else (area > 0.0):
+            pts = pts[::-1]
+        coords = pts.tolist()
+        coords.append(coords[0])
+        out.append(coords)
+    return out
+
+
 def _as_ring(coords: Any) -> np.ndarray:
     """Координаты GeoJSON -> (N, 2) float64 (Z отбрасывается)."""
     arr = np.asarray(coords, dtype=np.float64)
@@ -158,7 +189,8 @@ class LabelFeature:
 class Detection:
     """Предсказанный объект в crs.internal.
 
-    geometry: Point — (1, 2); Polygon — внешнее кольцо (N, 2) без замыкания.
+    geometry: Point — (1, 2); Polygon — внешнее кольцо (N, 2) без замыкания (CCW).
+    holes — дыры полигона, каждое (N, 2) без замыкания (CW); у Point пусто.
     source — источник детекции, нужен мультимодальной фузии (стек 2).
     """
 
@@ -167,9 +199,10 @@ class Detection:
     geom_type: str
     geometry: np.ndarray
     source: str = SOURCE_RELIEF
+    holes: tuple[np.ndarray, ...] = ()
 
     def __post_init__(self) -> None:
-        """Валидация типа, формы и источника."""
+        """Валидация типа, формы, дыр и источника."""
         if self.geom_type not in (GEOM_POINT, GEOM_POLYGON):
             raise ValueError(f"Detection: неизвестный тип {self.geom_type}")
         if self.geometry.ndim != 2 or self.geometry.shape[1] != 2:
@@ -183,6 +216,16 @@ class Detection:
                 f"Detection: неизвестный source {self.source!r}, "
                 f"ожидался один из {sorted(_SOURCES)}"
             )
+        if self.geom_type == GEOM_POINT and self.holes:
+            raise ValueError("Detection: у Point не может быть дыр")
+        holes = []
+        for i, hole in enumerate(self.holes):
+            hole = np.asarray(hole, dtype=np.float64)
+            if hole.ndim != 2 or hole.shape[1] != 2 or len(hole) < 3:
+                raise ValueError(f"Detection: дыра {i} должна быть (N>=3, 2)")
+            holes.append(hole)
+        if holes:
+            object.__setattr__(self, "holes", tuple(holes))
 
     @property
     def centroid(self) -> np.ndarray:
@@ -274,13 +317,15 @@ def write_detections(
     transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
     features: list[dict[str, Any]] = []
     for det in detections:
-        coords = _transform(transformer, det.geometry)
         if det.geom_type == GEOM_POINT:
+            coords = _transform(transformer, det.geometry)
             geometry = {"type": GEOM_POINT, "coordinates": coords[0].tolist()}
         else:
-            ring = coords.tolist()
-            ring.append(ring[0])
-            geometry = {"type": GEOM_POLYGON, "coordinates": [ring]}
+            rings = [_transform(transformer, r) for r in (det.geometry, *det.holes)]
+            geometry = {
+                "type": GEOM_POLYGON,
+                "coordinates": polygon_rings_to_coords(rings),
+            }
         features.append(
             {
                 "type": "Feature",

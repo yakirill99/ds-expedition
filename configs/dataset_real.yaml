@@ -42,7 +42,7 @@ data:
 
 targets:
   # NULL вместо класса 0: строки = контракт модели, порядок фиксирован.
-  classes: [mound, rampart, ditch]
+  classes: [mound,rampart,ditch]
   heatmap_sigma_px: 3.0
 
 

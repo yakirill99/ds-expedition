@@ -1,6 +1,9 @@
+import json
+
 import numpy as np
 import pytest
 
+from expds.eval.metric import EvalObject, polygon_iou
 from expds.features.grid import Grid
 from expds.io.geojson import Detection, read_labels, ring_centroid, write_detections
 from expds.post import (
@@ -150,3 +153,77 @@ def test_postprocess_max_detections():
     top = postprocess(probs, _grid(), ("mound",), PostConfig(max_detections=5))
     assert len(all_dets) == 80 and len(top) == 5
     assert [d.score for d in top] == [d.score for d in all_dets[:5]]
+
+
+# --- дыры полигонов --------------------------------------------------------------
+
+
+def test_seg_polygon_with_hole_smooth():
+    """Гладкое кольцо: дыра находится, радиусы колец — по 0.5-уровню вероятности."""
+    d = _dist(60.0, 70.0)
+    prob = np.clip(1 - np.abs(d - 14.0) / 4.0, 0.0, 1.0).astype(np.float32)
+    dets = seg_to_polygons(prob, _grid(), "mound", PostConfig())
+    assert len(dets) == 1
+    assert len(dets[0].holes) == 1
+    ring, hole = dets[0].geometry, dets[0].holes[0]
+    assert _area(ring) > 0 and _area(hole) < 0  # внешнее CCW, дыра CW
+    assert abs(_area(ring) / (np.pi * (16.0 * PS) ** 2) - 1) < 0.03
+    assert abs(abs(_area(hole)) / (np.pi * (12.0 * PS) ** 2) - 1) < 0.03
+
+
+def test_seg_polygon_with_hole_binary():
+    """Бинарное кольцо: у внутренней границы знак площади противоположен внешней."""
+    d = _dist(60.0, 70.0)
+    prob = ((d <= 20.0) & (d >= 8.0)).astype(np.float32)
+    dets = seg_to_polygons(prob, _grid(), "mound", PostConfig())
+    assert len(dets) == 1 and len(dets[0].holes) == 1
+    assert _area(dets[0].geometry) > 0 and _area(dets[0].holes[0]) < 0
+
+
+def test_solid_disk_has_no_holes():
+    prob = (_dist(60, 70) <= 20).astype(np.float32)
+    dets = seg_to_polygons(prob, _grid(), "mound", PostConfig())
+    assert len(dets) == 1 and dets[0].holes == ()
+
+
+def test_detection_rejects_bad_holes():
+    ring = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    with pytest.raises(ValueError, match="Point"):
+        Detection(
+            cls="mound", score=1.0, geom_type="Point", geometry=np.zeros((1, 2)), holes=(ring,)
+        )
+    with pytest.raises(ValueError, match="дыра"):
+        Detection(cls="mound", score=1.0, geom_type="Polygon", geometry=ring, holes=(ring[:2],))
+
+
+def test_holes_geojson_roundtrip(tmp_path):
+    """Дыры переживают запись/чтение; в файле внешнее CCW, дыры CW (RFC 7946)."""
+    d = _dist(60.0, 70.0)
+    prob = np.clip(1 - np.abs(d - 14.0) / 4.0, 0.0, 1.0).astype(np.float32)
+    grid = _grid()
+    dets = seg_to_polygons(prob, grid, "mound", PostConfig())
+    p = tmp_path / "pred.geojson"
+    write_detections(p, dets, grid.crs, "EPSG:3857")
+    fc = json.loads(p.read_text(encoding="utf-8"))
+    rings = fc["features"][0]["geometry"]["coordinates"]
+    assert len(rings) == 2
+    # в 3857 ориентация сохраняется (нет отражения): внешнее CCW, дыра CW
+    areas = [_area(np.asarray(r, dtype=np.float64)) for r in rings]
+    assert areas[0] > 0 and areas[1] < 0
+    feats = read_labels(p, grid, "EPSG:3857")
+    assert len(feats) == 1 and len(feats[0].world) == 2  # внешнее + дыра
+
+
+def test_iou_subtracts_holes():
+    """IoU кольца с диском того же радиуса = (R²-r²)/R² — дыра уменьшает площадь."""
+    r_out, r_in = 20.0, 10.0
+    ang = np.linspace(0.0, 2.0 * np.pi, 64, endpoint=False)
+    center = _world(60, 70)
+
+    def circle(r):
+        return np.column_stack([np.cos(ang), np.sin(ang)]) * r * PS + center
+
+    donut = EvalObject("mound", "Polygon", (circle(r_out), circle(r_in)))
+    disk = EvalObject("mound", "Polygon", (circle(r_out),))
+    iou = polygon_iou(donut.rings, disk.rings, 256)
+    assert abs(iou - (r_out**2 - r_in**2) / r_out**2) < 0.02
