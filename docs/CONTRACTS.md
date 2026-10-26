@@ -48,7 +48,7 @@
 
 ## 3. Слои build_layers и порядок каналов
 
-Порядок (`_order_channel_names`): `dtm` → рельеф → cloud → остальное.
+Порядок (`_order_channel_names` в `expds/data/build_site.py`): `dtm` → рельеф → cloud → остальное.
 Группы по префиксам, **внутри группы строковая сортировка** (не порядок префиксов).
 
 Шаблоны имён (relief.py, cloud_features.py, dtm.py):
