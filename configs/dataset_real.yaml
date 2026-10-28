@@ -8,41 +8,55 @@
 # Слои лежат вне git (Яндекс.Диск), реестр ссылок — data/README.md.
 # Скачать: make data
 # ============================================================
-
-
 data:
-  # Каталог участков: data/raw/<site_id>/...
   sites_dir: data/raw
   labels_file: labels.geojson
   # Порядок = контракт модели (сохраняется в чекпоинт).
+  # 26 слоёв, которые строит build_layers.py из LAS.
+  # rgb_*/mag отсутствуют у лидарных участков -> нули + channel_mask.
   channels:
     - dtm
     - slope
+    - aspect
     - hillshade_az_45
     - hillshade_az_135
     - hillshade_az_225
     - hillshade_az_315
+    - slrm_sigma_2.0
     - slrm_sigma_8.0
+    - slrm_sigma_32.0
     - positive_openness
     - negative_openness
     - sky_view_factor
     - curvature_sigma_2.0
+    - curvature_sigma_8.0
     - tpi_radius_5
+    - tpi_radius_15
     - tri_radius_3
+    - tri_radius_9
     - point_density
     - mean_intensity
-    - rgb_r
-    - rgb_g
-    - rgb_b
-    - mag
-  # none | site_robust: (x - median) / (p98 - p2) по валидным пикселям участка.
+    - std_intensity
+    - non_first_return_ratio
+    - mean_return_number
+    - mean_z
+    - z_std
   normalize: site_robust
   labels_crs: EPSG:3857
 
 
 targets:
-  # NULL вместо класса 0: строки = контракт модели, порядок фиксирован.
-  classes: [mound,rampart,ditch]
+  # Канонические классы регламента. Порядок = контракт модели,
+  # менять нельзя без переобучения: выход сети 2K каналов.
+  # finds_points и object_poly появятся с геофизикой (200-217).
+  classes:
+    - kurgany_tselye
+    - kurgany_povrezhdennye
+    - gorodishcha
+    - fortifikatsii
+    - arkhitektury
+    - finds_points
+    - object_poly
   heatmap_sigma_px: 3.0
 
 
@@ -95,18 +109,42 @@ eval:
 
 
 train:
-  epochs: 10
+  epochs: 40
   batch_size: 8
   lr: 0.001
   weight_decay: 0.0001
   amp: true
   device: auto
-  num_workers: 2
+  num_workers: 8        # 24 ядра
   seed: 0
-  tiles_per_epoch: 512
-  train_sites: []
-  val_sites: []
+  tiles_per_epoch: 1024
+  # Пространственный сплит: участки целиком.
+  # Группы одного ландшафта не разрываются:
+  #   Осечки   = 006 + 191
+  #   Эсбю     = 010 + 030
+  #   Гнёздово = 001 + 208-217
+  train_sites:
+    - 001_Гнёздово_Нивленское
+    - 006_Осечки_1.1км
+    - 009_Хальвасборген
+    - 011_Эрентуна
+    - 035_Шумгора
+    - 061_Граборг
+    - 104_Шетнево
+    - 105_Вщиж
+    - 191_Осечки_1.3км
+    - 200_Судьбищи_2
+  # hold-out: 013 (тестовый) + 010 (Швеция, фортификации)
+  # 030_Эсбю исключён: разметка в CRS84, не ляжет на растр (задача D8)
+  val_sites:
+    - 013_Нора_Виннон
+    - 010_Эсбю_укрепление
   runs_dir: runs
+  augment:
+    hflip_p: 0.5
+    vflip_p: 0.5
+    rot90_p: 0.5
+    channel_dropout_p: 0.1
 
 
 # ============================================================

@@ -64,17 +64,17 @@ cloud_features:
   nodata: -9999.0
 
 # --- используется: производные рельефа (build_relief_layers роли 1) ---
+
 relief:
   hillshade_azimuths: [45, 135, 225, 315]
   hillshade_altitude: 45.0
   hillshade_z_factor: 1.0
-  # σ=8 px при 1 м — объекты 16–25 м (курганы).
-  slrm_sigmas: [8.0]
-  openness_radius: 5
-  openness_n_directions: 8
-  curvature_sigmas: [2.0]
-  tpi_radii: [5]
-  tri_radii: [3]
+  slrm_sigmas: [2.0, 8.0, 32.0]
+  openness_radius: 10
+  openness_n_directions: 16
+  curvature_sigmas: [2.0, 8.0]
+  tpi_radii: [5, 15]
+  tri_radii: [3, 9]
 
 align:
   default_method: bilinear
@@ -175,9 +175,16 @@ data:
   normalize: site_robust
 
 targets:
-  classes: [mound,rampart,ditch]
-  # Сигма гаусса для точечных объектов, пиксели.
+  classes:
+    - kurgany_tselye
+    - kurgany_povrezhdennye
+    - gorodishcha
+    - fortifikatsii
+    - arkhitektury
+    - finds_points
+    - object_poly
   heatmap_sigma_px: 3.0
+
 
 tiles:
   tile_px: 256
