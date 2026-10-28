@@ -36,7 +36,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-extend-exclude = ["notebooks", "web/static", "web/media", "web/**/migrations"]
+extend-exclude = ["notebooks", "web/static", "web/media", "web/**/migrations", "vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
