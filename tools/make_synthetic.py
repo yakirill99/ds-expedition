@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import logging
 import math
@@ -42,7 +41,6 @@ logger = logging.getLogger("make_synthetic")
 
 _ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG = _ROOT / "configs" / "dataset_synthetic.yaml"
-_BUILD_LAYERS_PATH = _ROOT / "scripts" / "build_layers.py"
 
 _KEY_SYNTHETIC = "synthetic"
 _SOURCE = "synthetic"
@@ -464,18 +462,11 @@ def _build_labels(
 # ------------------------------------------------------------
 # Участок
 # ------------------------------------------------------------
-def _load_build_layers() -> ModuleType:
-    """Импорт scripts/build_layers.py ради _save_sample (один формат sample на всех)."""
-    name = "build_layers"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, _BUILD_LAYERS_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Не удалось загрузить {_BUILD_LAYERS_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+def _load_build_site() -> ModuleType:
+    """Импорт expds.data.build_site ради _save_sample (один формат sample на всех)."""
+    import expds.data.build_site
+
+    return expds.data.build_site
 
 
 def _layer(name: str, data: np.ndarray, grid: Grid, nodata: float, unit: str) -> Layer:
@@ -495,7 +486,7 @@ def generate_site(
     site_idx: int,
     cfg: SyntheticConfig,
     app: AppConfig,
-    build_layers_module: ModuleType,
+    build_site_module: ModuleType,
 ) -> dict[str, int]:
     """Генерирует один участок и пишет его на диск.
 
@@ -503,7 +494,7 @@ def generate_site(
         site_idx: номер участка с 0 (папка site_<idx+1>).
         cfg: параметры генератора.
         app: конфиг роли 1 (CRS, сетка, рельеф).
-        build_layers_module: модуль build_layers (для _save_sample).
+        build_site_module: модуль expds.data.build_site (для _save_sample).
 
     Returns:
         Счётчики объектов по классам и типам геометрии.
@@ -556,7 +547,7 @@ def generate_site(
     site_dir = cfg.out_dir / site_name
     for layer in layers.values():
         write_raster(layer=layer, path=site_dir / "layers" / f"{layer.name}.tif")
-    build_layers_module._save_sample(
+    build_site_module._save_sample(
         layers=layers,
         grid=grid,
         output_dir=site_dir / "samples",
@@ -615,10 +606,10 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.size_px * app.grid.pixel_size <= 4 * cfg.edge_margin_m:
         raise ValueError(f"Участок {cfg.size_px} px слишком мал для отступа {cfg.edge_margin_m} м")
 
-    build_layers_module = _load_build_layers()
+    build_site_module = _load_build_site()
     t0 = time.perf_counter()
     for site_idx in range(cfg.n_sites):
-        counts = generate_site(site_idx, cfg, app, build_layers_module)
+        counts = generate_site(site_idx, cfg, app, build_site_module)
         logger.info("site_%d: %s", site_idx + 1, counts)
     logger.info(
         "Готово: %d участков %dx%d за %.1f с -> %s",

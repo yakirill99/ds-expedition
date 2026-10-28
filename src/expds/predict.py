@@ -1,9 +1,11 @@
-"""Инференс: участок(и) со слоями -> GeoJSON детекций в CRS разметки (EPSG:3857).
+"""Инференс: участок(и) со слоями ИЛИ сырой лидарный участок -> GeoJSON (EPSG:3857).
 
-Участок — папка с layers/ (формат build_layers / make_synthetic). --data указывает на участок
-или на папку участков; детекции всех участков сливаются в один FeatureCollection.
-Модель и её конфиг берутся из чекпойнта; каналы и классы сверяются с YAML.
-Сети нет: torch.load локально, энкодер без предобученных весов.
+Готовый участок — папка с layers/ (формат build_layers / make_synthetic); сырой —
+папка с LAS/LAZ, слои собираются автоматически (expds.data.build_site). --data
+указывает на участок или на папку участков; детекции всех участков сливаются
+в один FeatureCollection. Модель и её конфиг берутся из чекпойнта; каналы и
+классы сверяются с YAML. Сети нет: torch.load локально, энкодер без
+предобученных весов.
 """
 
 from __future__ import annotations
@@ -11,12 +13,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from expds.data.build_site import RawSiteUnsupportedError, resolve_sites
+from expds.features.config import AppConfig
+from expds.features.config import load_config as load_role1_config
 from expds.infer import detect, predict_probs, resolve_device
 from expds.io.geojson import write_detections
 from expds.models.checkpoint import load_checkpoint
@@ -32,7 +38,11 @@ _NO_LABELS = "__inference_no_labels__.geojson"  # на инференсе раз
 
 
 def find_sites(data: Path) -> list[Path]:
-    """Участок (есть layers/) или список участков в папке."""
+    """Участок (есть layers/) или список участков в папке.
+
+    Только для готовых участков; run() использует resolve_sites, который
+    дополнительно собирает сырые лидарные (build_site).
+    """
     data = Path(data)
     if (data / _LAYERS_DIR).is_dir():
         return [data]
@@ -43,6 +53,19 @@ def find_sites(data: Path) -> list[Path]:
             "(сырьё LAS -> слои: scripts/build_layers.py)"
         )
     return sites
+
+
+def _load_role1_if_present(config: Path) -> AppConfig | None:
+    """Конфиг роли 1 из того же YAML (run() и так его читает как PipelineConfig).
+
+    None — в YAML нет секций роли 1 (dataset/lidar/ground/dtm/...):
+    автосборка слоёв недоступна, работают только готовые участки.
+    """
+    try:
+        return load_role1_config(config)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("В конфиге нет секций роли 1 (%s) — автосборка слоёв отключена", exc)
+        return None
 
 
 def merge_geojson(parts: Sequence[Path], out: Path) -> None:
@@ -83,7 +106,9 @@ def run(
         div = input_divisor(ModelConfig.from_dict(meta["model_cfg"]))
         if cfg.tiles.tile_px % div:
             raise ValueError(f"tiles.tile_px={cfg.tiles.tile_px} не делится на {div}")
-    sites = find_sites(Path(data))
+    with prof.stage("участки"):
+        app_cfg = _load_role1_if_present(Path(config))
+        sites = resolve_sites(Path(data), app_cfg, prof)
     classes = cfg.targets.classes
     bs = batch_size or cfg.train.batch_size
     out = Path(out)
@@ -151,7 +176,12 @@ def main(
     ap.add_argument("--batch-size", type=int)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    stats = run(args.config, args.data, args.weights, args.out, args.device, args.batch_size)
+    try:
+        stats = run(args.config, args.data, args.weights, args.out, args.device, args.batch_size)
+    except RawSiteUnsupportedError as exc:
+        logger.error("%s", exc)
+        print(f"ОШИБКА: {exc}", file=sys.stderr, flush=True)
+        return 2
     print(
         f"OK: {stats['n_detections']} детекций, участков {stats['n_sites']}, "
         f"{stats['seconds']:.1f} с -> {stats['out']}",
