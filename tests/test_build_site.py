@@ -11,6 +11,8 @@ import pytest
 from expds.data.build_site import (
     RawSiteUnsupportedError,
     build_site,
+    build_site_from_dtm,
+    find_dtm_raster,
     find_lidar_files,
     resolve_sites,
     site_kind,
@@ -299,3 +301,121 @@ def test_resolve_sites_built_passthrough(tmp_path: Path, app_cfg) -> None:
     # готовый участок как --data: без AppConfig, без сборки
     site = _make_built_site(tmp_path, "site_1")
     assert resolve_sites(site, None, Profiler()) == [site]
+
+
+# --- растровые DTM-участки (AHN) -------------------------------------------------
+
+
+def _write_dtm(path: Path, crs: str = "EPSG:28992", n: int = 48, pixel: float = 0.5) -> None:
+    """Мини-DTM GeoTIFF (north-up): плоская земля + купол в центре (как AHN)."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    xs = 180000.0 + np.arange(n) * pixel
+    ys = 318000.0 + np.arange(n) * pixel
+    xx, yy = np.meshgrid(xs, ys)
+    cx, cy = xs[n // 2], ys[n // 2]
+    z = 20.0 + 2.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 3.0**2))
+    transform = from_origin(180000.0, ys[-1] + pixel, pixel, pixel)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=n,
+        width=n,
+        count=1,
+        dtype="float32",
+        crs=crs,
+        transform=transform,
+    ) as dst:
+        # north-up: строка 0 — север
+        dst.write(np.flipud(z).astype("float32"), 1)
+
+
+def test_find_dtm_raster(tmp_path: Path) -> None:
+    assert find_dtm_raster(tmp_path) is None
+    (tmp_path / "dtm_1.tif").write_bytes(b"")
+    (tmp_path / "dtm.tif").write_bytes(b"")
+    assert find_dtm_raster(tmp_path) == tmp_path / "dtm.tif"
+
+
+def test_build_site_from_dtm_end_to_end(tmp_path: Path) -> None:
+    site = tmp_path / "ahn_1"
+    site.mkdir()
+    _write_dtm(site / "dtm.tif")
+
+    prof = Profiler()
+    res = build_site_from_dtm(site, site, profiler=prof)
+
+    assert res.built is True
+    assert res.n_points_total == 0 and res.n_points_ground == 0
+    assert "dtm" in res.layer_names
+    for name in (
+        "slope",
+        "hillshade_az_45",
+        "slrm_sigma_8.0",
+        "positive_openness",
+        "sky_view_factor",
+        "tpi_radius_15",
+    ):
+        assert name in res.layer_names, res.layer_names
+    # облака нет: растровый источник
+    assert "point_density" not in res.layer_names
+
+    meta = json.loads((site / "samples" / "sample_meta.json").read_text(encoding="utf-8"))
+    assert meta["channel_names"][0] == "dtm"
+    assert meta["grid"]["crs"] == "EPSG:28992"
+    assert meta["grid"]["pixel_size"] == 0.5
+    assert len(meta["channel_mask"]) == meta["n_channels"]
+
+    # купол виден в DTM
+    import rasterio
+
+    with rasterio.open(site / "layers" / "dtm.tif") as src:
+        dtm = src.read(1)
+    valid = dtm[dtm > -9000.0]
+    assert float(valid.max() - valid.min()) >= 1.0
+
+    # идемпотентность и force
+    res2 = build_site_from_dtm(site, site, Profiler())
+    assert res2.built is False and res2.layer_names == res.layer_names
+    res3 = build_site_from_dtm(site, site, profiler=Profiler(), force=True)
+    assert res3.built is True
+    assert prof.report() is not None
+
+
+def test_build_site_from_dtm_requires_dtm(tmp_path: Path) -> None:
+    site = tmp_path / "no_dtm"
+    site.mkdir()
+    (site / "hillshade.tif").write_bytes(b"")
+    with pytest.raises(RawSiteUnsupportedError, match="dtm"):
+        build_site_from_dtm(site, site, Profiler())
+
+
+def test_resolve_sites_raster_dtm_site(tmp_path: Path) -> None:
+    # растровый DTM-участок собирается даже с cfg=None (роль-1 не нужна)
+    site = tmp_path / "ahn_1"
+    site.mkdir()
+    _write_dtm(site / "dtm.tif")
+    sites = resolve_sites(site, None, Profiler())
+    assert sites == [site]
+    assert (site / "layers" / "dtm.tif").is_file()
+    assert site_kind(site) == "built"
+
+
+def test_resolve_sites_folder_with_raster_dtm(tmp_path: Path) -> None:
+    root = tmp_path / "sites"
+    root.mkdir()
+    _make_built_site(root, "site_a")
+    ahn = root / "ahn_1"
+    ahn.mkdir()
+    _write_dtm(ahn / "dtm.tif")
+    ras = root / "site_c"
+    ras.mkdir()
+    (ras / "x.tif").write_bytes(b"")  # растр без dtm*.tif — по-прежнему пропуск
+    (root / "junk").mkdir()
+
+    sites = resolve_sites(root, None, Profiler())
+    # ready — в алфавитном порядке обхода детей: ahn_1 раньше site_a
+    assert [p.name for p in sites] == ["ahn_1", "site_a"]
+    assert (ahn / "layers" / "dtm.tif").is_file()

@@ -65,6 +65,7 @@ oracle F1 1.00; U-Net resnet34, 15 эпох × 512 тайлов (RTX 3050, ~7.5 
 
 - Дыры полигонов отбрасываются; все детекции — Polygon (точки — круги `point_radius_px`).
 - `Stitcher` держит 2K×H×W float32 (10k² при K=3 ≈ 2.4 ГБ).
-- Сырой лидарный участок собирается автоматически (`expds.data.build_site`): LAS прямо в папке участка -> `layers/`. Растровые участки без лидара не собираются (семантика каналов не согласована).
+- Сырой лидарный участок собирается автоматически (`expds.data.build_site`): LAS прямо в папке участка -> `layers/`. Растровый DTM-участок (dtm*.tif, вырезка/лист AHN) тоже собирается (`build_site_from_dtm`, конфиг роли 1 не нужен). Прочие растровые участки (карты SpOr/Li) не собираются (семантика каналов не согласована).
+- Внешняя валидация AHN: `scripts/fetch_ahn.py` (ImageServer Esri NL, 0.5 м, EPSG:28992) -> `build_layers.py --config configs/dataset_ahn.yaml` (pipeline-режим) -> разметка labels.geojson (3857) -> train/predict/evaluate; см. README-04-validation.md.
 - Регламент не получен: R_tolerance (значение и единицы: `eval.r_tol_units` crs|meters),
-  IoU-порог, классы, конвенция вызова entrypoint на платформе.
+  IoU-порог, классы, конвенция вызова entrypoint на платформе. Чек-лист сверки — README-04-validation.md.

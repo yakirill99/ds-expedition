@@ -10,9 +10,12 @@ sections dataset/lidar/crs/grid/ground/dtm/relief/cloud_features/align/logging).
   DTM -> производные рельефа -> признаки облака -> GeoTIFF + Sample;
 - уже собранный участок (out_dir/layers/ с GeoTIFF): пропуск (idempotent),
   force=True пересобирает;
-- растровый участок без лидара: RawSiteUnsupportedError — семантика каналов
-  не согласована с организаторами (docs/issues/03-data-geo.md, статус
-  04.10.2026: 8 из 9 участков растровые, из них лидар только в 013).
+- растровый участок без лидара и без DTM: RawSiteUnsupportedError —
+  семантика каналов не согласована с организаторами (docs/issues/03-data-geo.md,
+  статус 04.10.2026: 8 из 9 участков растровые, из них лидар только в 013);
+- растровый DTM-участок (dtm*.tif в корне, например лист AHN):
+  build_site_from_dtm — DTM уже «земля», производные рельефа считаются
+  от растра, каналы облака заполнятся нулями при загрузке (channel_mask).
 
 Вызов из инференса: expds.predict.run -> resolve_sites (автосборка сырых
 лидарных участков, структурированная ошибка для растровых).
@@ -32,9 +35,9 @@ from pathlib import Path
 import numpy as np
 
 from expds.data.las import read_points
-from expds.data.raster import write_raster
+from expds.data.raster import read_raster, read_raster_meta, write_raster
 from expds.features.cloud_features import build_cloud_features
-from expds.features.config import AppConfig
+from expds.features.config import AppConfig, ReliefConfig
 from expds.features.dtm import build_dtm
 from expds.features.grid import DataSpec, Grid, Layer, stack_layers
 from expds.features.ground import filter_ground
@@ -46,6 +49,23 @@ logger = logging.getLogger(__name__)
 _LAYERS_DIR = "layers"
 _SAMPLES_DIR = "samples"
 _LAS_SUFFIXES = {".las", ".laz"}
+_DTM_GLOB = "dtm*.tif"
+
+# Дефолтные производные рельефа для растровых DTM-участков (AHN): тот же
+# набор, что собирается из LAS на реальном участке 013 (hillshade 4 азимута,
+# SLRM 2/8/32, openness+SVF, кривизна 2/8, TPI 5/15, TRI 3/9). Конфиг
+# датасета выбирает из них подмножество каналов (data.channels).
+_DEFAULT_RELIEF = ReliefConfig(
+    hillshade_azimuths=(45.0, 135.0, 225.0, 315.0),
+    hillshade_altitude=45.0,
+    hillshade_z_factor=1.0,
+    slrm_sigmas=(2.0, 8.0, 32.0),
+    openness_radius=15,
+    openness_n_directions=16,
+    curvature_sigmas=(2.0, 8.0),
+    tpi_radii=(5, 15),
+    tri_radii=(3, 9),
+)
 
 # Фиксированный порядок каналов для Sample: сначала dtm, потом рельеф,
 # потом cloud. Внутри каждой группы — строковая сортировка (CONTRACTS.md §3).
@@ -97,6 +117,18 @@ def find_lidar_files(raw_dir: Path) -> list[Path]:
     if not p.is_dir():
         return []
     return sorted(q for q in p.rglob("*") if q.suffix.lower() in _LAS_SUFFIXES and q.is_file())
+
+
+def find_dtm_raster(raw_dir: Path) -> Path | None:
+    """DTM-растр в корне raw_dir: dtm.tif, иначе алфавитно первый dtm*.tif."""
+    p = Path(raw_dir)
+    if not p.is_dir():
+        return None
+    exact = p / "dtm.tif"
+    if exact.is_file():
+        return exact
+    hits = sorted(q for q in p.glob(_DTM_GLOB) if q.is_file())
+    return hits[0] if hits else None
 
 
 def site_kind(path: Path) -> str:
@@ -250,9 +282,11 @@ def _unsupported_message(raw_dir: Path, kind: str) -> str:
     """Человекочитаемое объяснение, почему участок не собирается."""
     if kind == "raster":
         return (
-            f"{Path(raw_dir).name}: растровый участок без лидара — автосборка слоёв "
-            "невозможна: семантика каналов (SpOr/Li/Ae/Or) не согласована с организаторами "
-            "(docs/issues/03-data-geo.md, статус 04.10.2026). "
+            f"{Path(raw_dir).name}: растровый участок без лидара и без dtm*.tif — "
+            "автосборка слоёв невозможна: семантика каналов (SpOr/Li/Ae/Or) не "
+            "согласована с организаторами (docs/issues/03-data-geo.md, статус 04.10.2026). "
+            "Исключение: DTM-растр (dtm*.tif, например лист AHN) собирается "
+            "автоматически (build_site_from_dtm). "
             f"Можно положить готовые слои руками: {raw_dir}/layers/*.tif "
             "(формат make_synthetic)."
         )
@@ -418,6 +452,149 @@ def build_site(
     )
 
 
+def build_site_from_dtm(
+    raw_dir: Path,
+    out_dir: Path,
+    relief: ReliefConfig | None = None,
+    nodata: float = -9999.0,
+    profiler: Profiler | None = None,
+    force: bool = False,
+) -> BuildSiteResult:
+    """Растровый DTM-участок (например, вырезка AHN) -> layers/ + samples/.
+
+    Отличия от лидарного build_site:
+    - сетка и CRS берутся из самого GeoTIFF (перепроецирование не делается —
+      labels.geojson перепроецируется на сетку участка при растеризации);
+    - DTM уже «земля»: фильтр земли, биннинг и артефакт-детектор не нужны;
+    - облака точек нет: каналы point_density/mean_intensity/... отсутствуют,
+      stack_layers заполнит их нулями и снимет channel_mask;
+    - AppConfig роли 1 не нужен (дефолтный набор производных — _DEFAULT_RELIEF,
+      тот же, что собирается из LAS на участке 013).
+
+    Args:
+        raw_dir: папка участка с dtm*.tif в корне.
+        out_dir: куда писать layers/ и samples/ (обычно == raw_dir).
+        relief: параметры производных рельефа (None — _DEFAULT_RELIEF).
+        nodata: значение nodata для выходных слоёв.
+        profiler: необязательный Profiler.
+        force: пересобрать, даже если out_dir/layers/ уже не пуст.
+
+    Returns:
+        BuildSiteResult (n_points_* = 0 — облака нет).
+
+    Raises:
+        RawSiteUnsupportedError: нет dtm*.tif или неквадратный пиксель.
+    """
+    raw_dir = Path(raw_dir)
+    out_dir = Path(out_dir)
+    prof = profiler if profiler is not None else Profiler()
+
+    layers_dir = out_dir / _LAYERS_DIR
+    layers_ready = layers_dir.is_dir() and next(layers_dir.glob("*.tif"), None) is not None
+    if not force and layers_ready:
+        names = tuple(sorted(p.stem for p in layers_dir.glob("*.tif")))
+        logger.info("%s: layers/ уже есть (%d слоёв), пропуск (force=False)", out_dir, len(names))
+        return BuildSiteResult(out_dir, names, 0, 0, built=False)
+
+    dtm_path = find_dtm_raster(raw_dir)
+    if dtm_path is None:
+        raise RawSiteUnsupportedError(_unsupported_message(raw_dir, "raster"))
+
+    with prof.stage("чтение растра DTM"):
+        meta = read_raster_meta(dtm_path)
+        if meta.pixel_size_x <= 0 or abs(meta.pixel_size_x - meta.pixel_size_y) > (
+            0.01 * meta.pixel_size_x
+        ):
+            raise RawSiteUnsupportedError(
+                f"{dtm_path.name}: пиксель не квадратный "
+                f"({meta.pixel_size_x:.4f} x {meta.pixel_size_y:.4f}) — производные "
+                "рельефа и сетка Grid рассчитаны на квадратный пиксель"
+            )
+        dtm_layer = read_raster(dtm_path, nodata=nodata)
+        grid = dtm_layer.grid
+        valid = dtm_layer.data[dtm_layer.data > nodata]
+        if valid.size == 0:
+            raise RawSiteUnsupportedError(f"{dtm_path.name}: в растре нет валидных значений")
+        logger.info(
+            "DTM: %s | %s | %dx%d | %.2f м/px | Z=[%.2f, %.2f]",
+            dtm_path.name,
+            grid.crs,
+            grid.width,
+            grid.height,
+            grid.pixel_size,
+            float(valid.min()),
+            float(valid.max()),
+        )
+
+    # Layer из read_raster называется по файлу — фиксируем контрактное имя dtm.
+    dtm_layer = Layer(
+        name=_CHANNEL_ORDER_DTM,
+        data=dtm_layer.data,
+        grid=grid,
+        nodata=nodata,
+        source=str(dtm_path),
+        license=dtm_layer.license,
+        unit="meters",
+    )
+
+    rel = relief if relief is not None else _DEFAULT_RELIEF
+    with prof.stage("производные рельефа"):
+        relief_arrays = build_relief_layers(
+            dtm=dtm_layer.data,
+            pixel_size=grid.pixel_size,
+            hillshade_azimuths=rel.hillshade_azimuths,
+            hillshade_altitude=rel.hillshade_altitude,
+            hillshade_z_factor=rel.hillshade_z_factor,
+            slrm_sigmas=rel.slrm_sigmas,
+            openness_radius=rel.openness_radius,
+            openness_n_directions=rel.openness_n_directions,
+            curvature_sigmas=rel.curvature_sigmas,
+            tpi_radii=rel.tpi_radii,
+            tri_radii=rel.tri_radii,
+        )
+    relief_layers = {
+        name: Layer(
+            name=name,
+            data=arr,
+            grid=grid,
+            nodata=nodata,
+            source=str(dtm_path),
+            license=dtm_layer.license,
+            unit="unitless",
+        )
+        for name, arr in relief_arrays.items()
+    }
+
+    layers: dict[str, Layer] = {"dtm": dtm_layer}
+    layers.update(relief_layers)
+
+    with prof.stage("сохранение слоёв"):
+        layers_dir.mkdir(parents=True, exist_ok=True)
+        for name, layer in layers.items():
+            write_raster(layer=layer, path=layers_dir / f"{name}.tif")
+
+    with prof.stage("сохранение Sample"):
+        _save_sample(
+            layers=layers,
+            grid=grid,
+            output_dir=out_dir / _SAMPLES_DIR,
+            nodata=nodata,
+        )
+
+    logger.info(
+        "Итог: %d слоёв (растровый DTM, без признаков облака) -> %s",
+        len(layers),
+        layers_dir,
+    )
+    return BuildSiteResult(
+        site_dir=out_dir,
+        layer_names=tuple(sorted(layers)),
+        n_points_total=0,
+        n_points_ground=0,
+        built=True,
+    )
+
+
 def resolve_sites(
     data: Path,
     cfg: AppConfig | None,
@@ -430,11 +607,15 @@ def resolve_sites(
     - data сам сырой лидарный участок (LAS прямо в корне) -> build_site
       в него же (layers/ рядом с сырьём); если LAS лежит в подпапках —
       укажите --data на папку, где лежит LAS;
+    - data сам растровый DTM-участок (dtm*.tif в корне) -> build_site_from_dtm
+      в него же (конфиг роли 1 не нужен);
     - data папка участков (есть дети-участки): site с layers/ -> как есть;
-      сырой лидарный -> build_site in-place; растровый без лидара ->
+      сырой лидарный -> build_site in-place; растровый с dtm*.tif ->
+      build_site_from_dtm in-place; растровый без лидара и без DTM ->
       RawSiteUnsupportedError (если готовых нет) или warning и пропуск;
       пустые папки -> junk, пропуск;
-    - cfg=None разрешает только готовые участки (конфиг роли 1 недоступен).
+    - cfg=None разрешает только готовые участки, растровые DTM-участки и
+      автосборку сырых лидарных (конфиг роли 1 нужен только для лидара).
     """
     data = Path(data)
     prof = profiler if profiler is not None else Profiler()
@@ -451,6 +632,10 @@ def resolve_sites(
         with prof.stage(f"{site.name}: сборка слоёв (build_site)"):
             build_site(site, site, cfg, prof)
 
+    def _build_dtm_inplace(site: Path) -> None:
+        with prof.stage(f"{site.name}: сборка слоёв (build_site_from_dtm)"):
+            build_site_from_dtm(site, site, profiler=prof)
+
     kind = site_kind(data)
     if kind == "built":
         return [data]
@@ -462,6 +647,9 @@ def resolve_sites(
             _build_inplace(data)
             return [data]
         if kind == "raster":
+            if find_dtm_raster(data) is not None:
+                _build_dtm_inplace(data)
+                return [data]
             raise RawSiteUnsupportedError(_unsupported_message(data, kind))
         raise FileNotFoundError(
             f"{data}: нет ни собранных слоёв (layers/), ни LAS/LAZ прямо в папке "
@@ -489,18 +677,23 @@ def resolve_sites(
                 raise
             ready.append(entry)
         elif k == "raster":
-            bad_raster.append(entry)
+            if find_dtm_raster(entry) is not None:
+                _build_dtm_inplace(entry)
+                ready.append(entry)
+            else:
+                bad_raster.append(entry)
 
     if bad_raster:
         if ready:
             logger.warning(
-                "Пропущены растровые участки без слоёв: %s (семантика каналов не согласована)",
+                "Пропущены растровые участки без слоёв и без dtm*.tif: %s "
+                "(семантика каналов не согласована)",
                 ", ".join(p.name for p in bad_raster),
             )
         else:
             raise RawSiteUnsupportedError(
-                "Нет ни одного готового участка. Растровые без лидара не собираются: "
-                + "; ".join(_unsupported_message(p, "raster") for p in bad_raster)
+                "Нет ни одного готового участка. Растровые без лидара и без dtm*.tif "
+                "не собираются: " + "; ".join(_unsupported_message(p, "raster") for p in bad_raster)
             )
     if skipped_raw:
         raise RawSiteUnsupportedError(
