@@ -80,7 +80,15 @@ def test_pipeline_config(pcfg: PipelineConfig) -> None:
     assert pcfg.data.channels[0] == "dtm"
     assert "aspect" not in pcfg.data.channels
     assert _ABSENT <= set(pcfg.data.channels)
-    assert pcfg.targets.classes == ("mound", "rampart", "ditch")
+    assert pcfg.targets.classes == (
+        "kurgany_tselye",
+        "kurgany_povrezhdennye",
+        "gorodishcha",
+        "fortifikatsii",
+        "arkhitektury",
+        "finds_points",
+        "object_poly",
+    )
 
 
 def test_load_site_channels_mask_targets(sites: list[SiteData], pcfg: PipelineConfig) -> None:

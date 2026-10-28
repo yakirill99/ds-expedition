@@ -142,7 +142,7 @@ def test_mounds_are_hills_in_file_orientation(synth_dir: Path) -> None:
         with rasterio.open(site / "layers" / f"{slrm_name}.tif") as src:
             arr = src.read(1)
             for f in _labels(site)["features"]:
-                if f["properties"]["class"] != "mound":
+                if f["properties"]["class"] != "kurgany_tselye":
                     continue
                 x, y = to_internal.transform(*_center(f))
                 row, col = src.index(x, y)

@@ -53,6 +53,15 @@ CLASS_MOUND = "mound"
 CLASS_RAMPART = "rampart"
 CLASS_DITCH = "ditch"
 
+#: Имена объектов генератора -> канонические классы регламента.
+#: Секции synthetic.mounds/ramparts/ditches остаются как есть (это
+#: параметры генератора), но в разметку пишется каноническое имя.
+CLASS_MAP: dict[str, str] = {
+    "mound": "kurgany_tselye",
+    "rampart": "fortifikatsii",
+    "ditch": "object_poly",
+}
+
 
 # ------------------------------------------------------------
 # Конфиг генератора
