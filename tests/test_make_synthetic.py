@@ -91,8 +91,8 @@ def test_labels_format(synth_dir: Path) -> None:
     fc = _labels(synth_dir / "site_1")
     assert fc["crs"]["properties"]["name"].endswith("3857")
     classes = {f["properties"]["class"] for f in fc["features"]}
-    assert "mound" in classes
-    assert classes <= {"mound", "rampart", "ditch"}
+    assert "kurgany_tselye" in classes
+    assert classes <= {"kurgany_tselye", "fortifikatsii", "object_poly"}
     for f in fc["features"]:
         geom = f["geometry"]
         assert geom["type"] in {"Point", "Polygon"}
@@ -134,9 +134,11 @@ def test_mounds_are_hills_in_file_orientation(synth_dir: Path) -> None:
     """
     app = load_config(_CONFIG)
     to_internal = Transformer.from_crs(app.crs.output, app.crs.internal, always_xy=True)
-    slrm_name = f"slrm_sigma_{app.relief.slrm_sigmas[0]}"
 
     checked = passed = 0
+    # σ=8 м — масштаб курганов (radius_m 4..15). Первая сигма в конфиге
+    # теперь 2.0 (мелкие детали), на ней крупные насыпи не видны.
+    slrm_name = "slrm_sigma_8.0"
     for i in range(1, _N_SITES + 1):
         site = synth_dir / f"site_{i}"
         with rasterio.open(site / "layers" / f"{slrm_name}.tif") as src:

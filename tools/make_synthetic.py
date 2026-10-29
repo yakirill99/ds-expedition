@@ -49,18 +49,12 @@ _CIRCLE_VERTICES = 32
 _PLACEMENT_TRIES_PER_OBJECT = 200
 _EPS = 1e-12
 
-CLASS_MOUND = "mound"
-CLASS_RAMPART = "rampart"
-CLASS_DITCH = "ditch"
-
-#: Имена объектов генератора -> канонические классы регламента.
-#: Секции synthetic.mounds/ramparts/ditches остаются как есть (это
-#: параметры генератора), но в разметку пишется каноническое имя.
-CLASS_MAP: dict[str, str] = {
-    "mound": "kurgany_tselye",
-    "rampart": "fortifikatsii",
-    "ditch": "object_poly",
-}
+# Канонические классы регламента (configs/*.yaml -> targets.classes).
+# Имена секций генератора (synthetic.mounds/ramparts/ditches) остаются
+# прежними: это параметры формы объектов, а не классы разметки.
+CLASS_MOUND = "kurgany_tselye"
+CLASS_RAMPART = "fortifikatsii"
+CLASS_DITCH = "object_poly"
 
 
 # ------------------------------------------------------------

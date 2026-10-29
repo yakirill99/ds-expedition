@@ -51,3 +51,4 @@ web/config/settings_local.py
 # Локальные заметки (только у нас)
 NOTES.local.md
 *.local.md
+configs/sites/
