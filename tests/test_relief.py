@@ -333,7 +333,8 @@ class TestBuildReliefLayers:
         )
         expected_keys = {
             "slope",
-            "aspect",
+            "aspect_sin",
+            "aspect_cos",
             "hillshade_az_45",
             "hillshade_az_135",
             "slrm_sigma_2.0",
@@ -387,7 +388,8 @@ class TestBuildReliefLayers:
         )
         expected_keys = {
             "slope",
-            "aspect",
+            "aspect_sin",
+            "aspect_cos",
             "positive_openness",
             "negative_openness",
             "sky_view_factor",

@@ -17,7 +17,8 @@ data:
   channels:
     - dtm
     - slope
-    - aspect
+    - aspect_sin
+    - aspect_cos
     - hillshade_az_45
     - hillshade_az_135
     - hillshade_az_225

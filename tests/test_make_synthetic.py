@@ -74,7 +74,7 @@ def test_config_readable_by_role1_loader() -> None:
 def test_site_structure(synth_dir: Path) -> None:
     for i in range(1, _N_SITES + 1):
         site = synth_dir / f"site_{i}"
-        for name in ("dtm", "slope", "aspect", "rgb_r", "rgb_g", "rgb_b", "mag"):
+        for name in ("dtm", "slope", "aspect_sin", "aspect_cos", "rgb_r", "rgb_g", "rgb_b", "mag"):
             assert (site / "layers" / f"{name}.tif").exists(), name
         assert list((site / "layers").glob("hillshade_az_*.tif"))
         assert list((site / "layers").glob("slrm_sigma_*.tif"))
