@@ -96,6 +96,10 @@ def polygons_to_mask(
         if k is None:
             skipped.add(feat.cls)
             continue
+        if not feat.pixel:
+            # Полигон без колец: разметка без геометрии либо объект
+            # целиком вне bbox участка после перепроекции.
+            continue
         ext = feat.pixel[0]
         win = _window(ext[:, 0].min(), ext[:, 0].max(), ext[:, 1].min(), ext[:, 1].max(), grid)
         if win is None:
