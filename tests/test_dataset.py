@@ -79,6 +79,8 @@ def _manual_site(width: int, height: int, labels: bool = True) -> SiteData:
 def test_pipeline_config(pcfg: PipelineConfig) -> None:
     assert pcfg.data.channels[0] == "dtm"
     assert "aspect" not in pcfg.data.channels
+    assert "aspect_sin" in pcfg.data.channels
+    assert "aspect_cos" in pcfg.data.channels
     assert _ABSENT <= set(pcfg.data.channels)
     assert pcfg.targets.classes == (
         "kurgany_tselye",

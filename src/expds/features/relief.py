@@ -414,7 +414,7 @@ def build_relief_layers(
 
     Возвращает словарь: имя слоя -> 2D массив float32.
     Имена:
-        slope, aspect,
+        slope, aspect_sin, aspect_cos,
         hillshade_az_<azimuth> для каждого азимута,
         slrm_sigma_<sigma> для каждой сигмы,
         positive_openness, negative_openness, sky_view_factor,
@@ -440,11 +440,12 @@ def build_relief_layers(
     """
     layers: dict[str, np.ndarray] = {}
 
-    # slope + aspect за один градиент.
     slope, aspect = compute_slope_aspect(dtm=dtm, pixel_size=pixel_size)
+    aspect_rad = aspect * _DEG_TO_RAD
     layers["slope"] = slope
-    layers["aspect"] = aspect
-    logger.info("Построены slope и aspect")
+    layers["aspect_sin"] = np.sin(aspect_rad).astype(np.float32)
+    layers["aspect_cos"] = np.cos(aspect_rad).astype(np.float32)
+    logger.info("Построены slope, aspect_sin, aspect_cos")
 
     # hillshade для каждого азимута.
     for azimuth in hillshade_azimuths:
