@@ -56,6 +56,7 @@ class SiteData:
     valid: np.ndarray
     y_seg: np.ndarray | None = None
     y_hm: np.ndarray | None = None
+    y_valid: np.ndarray | None = None
 
     @property
     def has_labels(self) -> bool:
@@ -98,6 +99,33 @@ def normalize_layer(layer: Layer) -> Layer:
         license=layer.license,
         unit="normalized",
     )
+
+
+# Класс -> префиксы папок-источников, без которых он не наблюдаем.
+# Нет записи — класс виден в рельефе, наблюдаем всегда.
+# ПРЕФИКСЫ ПРОВЕРИТЬ по факту: ls -d data/raw/200_Судьбищи_2/0*/
+_CLASS_SOURCE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "finds_points": ("07_",),
+    "object_poly": ("07_",),
+    "arkhitektury": ("03_", "04_"),
+}
+
+
+def class_validity(site_dir: Path, classes: Sequence[str]) -> np.ndarray:
+    """(K,) float32: 1 — класс наблюдаем на участке, 0 — источника нет.
+
+    Ноль означает не «объектов нет», а «мы не смотрели»: лосс по такому
+    классу обнуляется. Иначе на лидарных участках без геофизики голова
+    finds_points учится «находок нет нигде» и глушит 200_Судьбищи_2,
+    где они размечены.
+    """
+    dirs = {p.name[:3] for p in site_dir.iterdir() if p.is_dir()}
+    out = np.ones(len(classes), dtype=np.float32)
+    for k, name in enumerate(classes):
+        need = _CLASS_SOURCE_PREFIXES.get(name)
+        if need is not None and not dirs.intersection(need):
+            out[k] = 0.0
+    return out
 
 
 def load_site(
@@ -168,6 +196,7 @@ def load_site(
         valid=valid,
         y_seg=y_seg,
         y_hm=y_hm,
+        y_valid=class_validity(site_dir, classes) if y_seg is not None else None,
     )
 
 
@@ -268,4 +297,6 @@ class KozDataset(Dataset):
             assert site.y_seg is not None and site.y_hm is not None
             item["y_seg"] = torch.from_numpy(self._pad(site.y_seg, window, np.float32))
             item["y_hm"] = torch.from_numpy(self._pad(site.y_hm, window, np.float32))
+            if site.y_valid is not None:
+                item["y_valid"] = torch.from_numpy(site.y_valid.copy())
         return item

@@ -263,10 +263,13 @@ def fit(
                 y_seg = batch["y_seg"].to(device, non_blocking=True)
                 y_hm = batch["y_hm"].to(device, non_blocking=True)
                 valid = batch["valid"].to(device, non_blocking=True)
+                y_valid = batch.get("y_valid")
+                if y_valid is not None:
+                    y_valid = y_valid.to(device, non_blocking=True)
                 opt.zero_grad(set_to_none=True)
                 with autocast(device, use_amp):
                     logits = model(x)
-                out = loss_fn(logits, y_seg, y_hm, valid)
+                out = loss_fn(logits, y_seg, y_hm, valid, y_valid)
                 scaler.scale(out["loss"]).backward()
                 scaler.step(opt)
                 scaler.update()

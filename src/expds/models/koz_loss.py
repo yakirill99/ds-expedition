@@ -52,7 +52,17 @@ class KozLoss(nn.Module):
         y_seg: torch.Tensor,
         y_hm: torch.Tensor,
         valid: torch.Tensor | None = None,
+        y_valid: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        """logits -> скалярный лосс и компоненты.
+
+        valid (B, H, W) — попиксельная маска (nodata, паддинг).
+        y_valid (B, K) или (K,) — валидность класса на участке: 0 означает
+        «модальность не снималась», а не «объектов нет». Вклад такого
+        класса в лосс обнуляется, иначе на участках без геофизики голова
+        finds_points учится «находок нет нигде» и глушит те участки,
+        где они есть.
+        """
         c = self.cfg
         heads = split_heads(logits.float(), self.k)
         seg, hm = heads["seg"], heads["hm"]
@@ -61,24 +71,35 @@ class KozLoss(nn.Module):
             m = torch.ones_like(seg[:, :1])
         else:
             m = valid.to(seg.dtype).reshape(seg.shape[0], 1, *seg.shape[2:])
-        n = (m.sum() * self.k).clamp_min(1.0)
+        n_px = m.sum().clamp_min(1.0)
+
+        # Веса классов: нормируем на сумму, чтобы масштаб лосса не зависел
+        # от числа активных классов в батче.
+        if y_valid is None:
+            wv = torch.full((self.k,), 1.0 / self.k, device=seg.device, dtype=seg.dtype)
+        else:
+            v = y_valid.to(seg.dtype).reshape(-1)[: self.k].clamp(0.0, 1.0)
+            total = v.sum()
+            wv = v / total if total > 0 else torch.full_like(v, 1.0 / self.k)
 
         p = torch.sigmoid(seg)
         pm, tm = p * m, y_seg * m
         inter = (pm * tm).sum(dim=(0, 2, 3))
         den = pm.sum(dim=(0, 2, 3)) + tm.sum(dim=(0, 2, 3))
-        dice = 1.0 - ((2.0 * inter + c.smooth) / (den + c.smooth)).mean()
+        dice_k = 1.0 - ((2.0 * inter + c.smooth) / (den + c.smooth))
+        dice = (dice_k * wv).sum()
 
         bce = F.binary_cross_entropy_with_logits(seg, y_seg, reduction="none")
         p_t = p * y_seg + (1 - p) * (1 - y_seg)
         a_t = c.focal_alpha * y_seg + (1 - c.focal_alpha) * (1 - y_seg)
-        focal = (a_t * (1 - p_t).pow(c.focal_gamma) * bce * m).sum() / n
+        focal_k = (a_t * (1 - p_t).pow(c.focal_gamma) * bce * m).sum(dim=(0, 2, 3)) / n_px
+        focal = (focal_k * wv).sum()
 
         q = torch.sigmoid(hm)
         bce_h = F.binary_cross_entropy_with_logits(hm, y_hm, reduction="none")
-        hm_loss = ((q - y_hm).abs().pow(c.hm_beta) * bce_h * m).sum() / (
-            (y_hm * m).sum().clamp_min(c.hm_min_norm)
-        )
+        hm_num = ((q - y_hm).abs().pow(c.hm_beta) * bce_h * m).sum(dim=(0, 2, 3))
+        hm_den = (y_hm * m).sum(dim=(0, 2, 3)).clamp_min(c.hm_min_norm)
+        hm_loss = ((hm_num / hm_den) * wv).sum()
 
         total = (
             c.seg_weight * (c.dice_weight * dice + c.focal_weight * focal) + c.hm_weight * hm_loss

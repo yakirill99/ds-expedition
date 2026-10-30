@@ -13,7 +13,7 @@ import pytest
 from expds.features.config import load_config
 from expds.features.grid import Grid
 from expds.pipeline_config import PipelineConfig, load_pipeline_config
-from expds.tiles.dataset import KozDataset, SiteData, load_site
+from expds.tiles.dataset import KozDataset, SiteData, class_validity, load_site
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CONFIG = _ROOT / "configs" / "dataset_synthetic.yaml"
@@ -166,3 +166,16 @@ def test_mixed_channels_raise() -> None:
     b = SiteData(**{**a.__dict__, "channel_names": ("a", "c")})
     with pytest.raises(ValueError, match="каналы"):
         KozDataset([a, b], 64, 0)
+
+
+def test_class_validity_masks_unobservable(tmp_path: Path) -> None:
+    """Без папки-источника класс выпадает из лосса, с папкой — остаётся."""
+    (tmp_path / "01_site_La_точки").mkdir()
+    classes = ["kurgany_tselye", "finds_points", "arkhitektury"]
+
+    v = class_validity(tmp_path, classes)
+    assert v.tolist() == [1.0, 0.0, 0.0]
+
+    (tmp_path / "07_site_MagGr").mkdir()
+    v = class_validity(tmp_path, classes)
+    assert v.tolist() == [1.0, 1.0, 0.0]

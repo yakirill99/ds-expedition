@@ -18,6 +18,9 @@ venv/
 *.npz
 *.npy
 *.csv
+    
+*_overlay.png
+audit_*.log
 
 # Logs
 logs/
