@@ -1,0 +1,92 @@
+# Единый манифест участков. Участки лежат в data/raw один раз,
+# наборы ниже — фильтры над каталогом, а не копии.
+#
+#   uv run python scripts/sites.py show                 # сводка + проверка утечек
+#   uv run python scripts/sites.py list train --paths   # пути для скриптов
+#   uv run python scripts/sites.py table                # каждый участок
+#
+# Номера ВСЕГДА в кавычках: YAML читает 014 как восьмеричное 12.
+
+root: data/raw
+
+# Участки одного ландшафта: группа целиком в train, val или test.
+# Ключ — начало имени без номера. Участок вне списка — сам себе группа.
+# Курганы_N / Постройки_N / Каменные_выкладки_N сюда НЕ входят: они в разных
+# UTM-зонах (130 -> 32644, 135 -> 32643, 158 -> 32637), это разные места.
+groups:
+  - Гнёздово
+  - Осечки
+  - Эсбю
+  - Кисловодская
+  - Семибратнее       # 186 (лидар) и 201-207 (геофизика) — одно городище
+  - Судьбищи
+  - Новотитаровская
+  - Примаки
+  - Красносельская
+  - Вышегжа
+  - Стеклянуха
+  - Боровичи
+  - Воронеж           # проверить по координатам
+  - Калмыкия          # проверить
+  - Тыва              # проверить
+  - Таш_Коро
+  - Иссык_Куль
+
+# Убраны отовсюду: из сплита и из всех наборов.
+exclude:
+  - "216"   # Гнёздово_Селище_2: разметка без единого растра
+  - "012"   # Сож: сетка 78 Мпкс > max_pixels, ждёт нарезки на под-участки
+  - "058"   # Перынь: 33 Мпкс, то же
+
+split:
+  seed: 0
+  fractions: {train: 0.8, val: 0.1, test: 0.1}
+  # Ручное закрепление группы, если хеш отправил её неудачно.
+  # Ключ — имя группы (или полное имя одиночного участка).
+  pin:
+    Семибратнее: val
+  #  Гнёздово: train
+
+# Ключи набора (все необязательны, условия через И):
+#   split:   train | val | test | список
+#   kind:    lidar | optic | geo | none | список
+#   require: labels | layers | rgb | built   — должно быть
+#   missing: labels | layers | rgb | built   — должно отсутствовать
+#   only:    "001,076,082-091" — белый список номеров/имён
+#   exclude: то же, чёрный список
+# built = есть layers/dtm.tif или layers/rgb_r.tif.
+sets:
+  smoke:
+    description: мелкие собранные участки для быстрой проверки кода
+    only: "001,076,079,082,091,125"
+    require: [labels, built]
+
+  train:
+    split: train
+    kind: [lidar, optic]
+    require: [labels, built]
+  val:
+    split: val
+    kind: [lidar, optic]
+    require: [labels, built]
+  test:
+    split: test
+    kind: [lidar, optic]
+    require: [labels, built]
+
+  geo_all:
+    description: D4.4 — геофизика, пока не собирается
+    kind: geo
+    require: [labels]
+
+  # Очереди подготовки: что ещё не сделано.
+  todo_labels:
+    missing: [labels]
+  todo_lidar:
+    kind: lidar
+    require: [labels]
+    missing: [layers]
+  todo_optic:
+    kind: optic
+    require: [labels]
+    missing: [rgb]
