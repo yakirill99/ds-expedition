@@ -55,3 +55,7 @@ web/config/settings_local.py
 NOTES.local.md
 *.local.md
 configs/sites/
+
+# Генерируется scripts/survey_dataset.py --split, зависит от локального набора
+configs/split_*.yaml
+data/survey*.json
