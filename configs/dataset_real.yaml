@@ -12,8 +12,8 @@ data:
   sites_dir: data/raw
   labels_file: labels.geojson
   # Порядок = контракт модели (сохраняется в чекпоинт).
-  # 26 слоёв, которые строит build_layers.py из LAS.
-  # rgb_*/mag отсутствуют у лидарных участков -> нули + channel_mask.
+  # 27 слоёв из LAS (build_layers.py) + 4 растровых (rgb_r/g/b, mag)
+  # -> 31. rgb_*/mag отсутствуют у лидарных участков: нули + channel_mask.
   channels:
     - dtm
     - slope
@@ -42,6 +42,10 @@ data:
     - mean_return_number
     - mean_z
     - z_std
+    - rgb_r
+    - rgb_g
+    - rgb_b
+    - mag
   normalize: site_robust
   labels_crs: EPSG:3857
 
@@ -135,7 +139,6 @@ train:
     - 105_Вщиж
     - 191_Осечки_1.3км
     - 200_Судьбищи_2
-  # hold-out: 013 (тестовый) + 010 (Швеция, фортификации)
     - 030_Эсбю
   val_sites:
     - 013_Нора_Виннон
@@ -180,17 +183,3 @@ layers:
     glob: "gpr*.tif"
     kind: raster
     optional: true
-
-
-# ============================================================
-# Участки (читает expds.spec.load_spec)
-# root необязателен: по умолчанию <data.sites_dir>/<site_id>.
-# grid необязателен: null => вывести из первого растра на диске.
-# ============================================================
-
-
-sites:
-  - site_id: 013_Nora_Vinnon
-    grid: null
-  - site_id: 048
-    grid: null
