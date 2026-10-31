@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -171,3 +172,129 @@ def test_normalize_rgb_group_shares_scale() -> None:
 
     assert spread_b > 0.0
     assert spread_r == pytest.approx(10.0 * spread_b, rel=1e-4)
+
+
+def test_build_keeps_existing_grid_from_lidar(tmp_path: Path) -> None:
+    """Участок с готовыми слоями сохраняет свою сетку, meta не перезаписывается.
+
+    Сетка лидарного участка — контракт для 27 рельефных слоёв. Пересчёт
+    по разметке заставил бы read_raster ресемплить их на чужую сетку,
+    а таргеты — считаться на других пикселях. Ошибка тихая: CRS совпадает,
+    extent нет, предупреждение тонет в логе.
+    """
+    _labels(tmp_path, 3_600_000.0, 6_000_000.0, size=10.0)
+
+    lidar = Grid(
+        crs="EPSG:32636",
+        pixel_size=1.0,
+        x_min=500_000.0,
+        y_min=6_000_000.0,
+        width=8,
+        height=8,
+    )
+    meta = tmp_path / "samples" / "sample_meta.json"
+    meta.parent.mkdir(parents=True)
+    meta.write_text(json.dumps({"grid": asdict(lidar)}), encoding="utf-8")
+    before = meta.read_text(encoding="utf-8")
+
+    # Источник покрывает лидарную сетку целиком.
+    (tmp_path / "04_x_SpOr_спутник").mkdir()
+    _write_src(
+        tmp_path / "04_x_SpOr_спутник" / "s.tif",
+        np.full((3, 8, 8), 90.0, dtype=np.float32),
+        "EPSG:32636",
+        from_origin(lidar.x_min, lidar.y_min + lidar.height, 1.0, 1.0),
+    )
+
+    res = build_site_rasters(tmp_path, _MERC, pad_px=8)
+    assert res["built"], res
+    g = res["grid"]
+    assert (g.crs, g.x_min, g.y_min, g.width, g.height) == (
+        lidar.crs,
+        lidar.x_min,
+        lidar.y_min,
+        lidar.width,
+        lidar.height,
+    )
+    assert meta.read_text(encoding="utf-8") == before, "мета лидарного участка перезаписана"
+
+
+def test_build_adopts_lidar_dtm_grid(tmp_path: Path) -> None:
+    """Есть dtm.tif, нет sample_meta.json — сетка берётся из dtm.
+
+    У 001, 035, 105 слои собраны из LAS, но мета отсутствует. Сетку
+    задаёт рельеф: посчитать её по разметке значит заставить read_raster
+    ресемплить 27 слоёв на чужие пиксели.
+    """
+    _labels(tmp_path, 3_600_000.0, 6_000_000.0, size=10.0)
+
+    lidar = Grid(
+        crs="EPSG:32636", pixel_size=1.0, x_min=500_000.0, y_min=6_000_000.0, width=8, height=8
+    )
+    (tmp_path / "layers").mkdir()
+    transform = from_origin(lidar.x_min, lidar.y_min + lidar.height, 1.0, 1.0)
+    _write_src(
+        tmp_path / "layers" / "dtm.tif",
+        np.zeros((1, 8, 8), dtype=np.float32),
+        "EPSG:32636",
+        transform,
+    )
+    (tmp_path / "04_x_SpOr_спутник").mkdir()
+    _write_src(
+        tmp_path / "04_x_SpOr_спутник" / "s.tif",
+        np.full((3, 8, 8), 90.0, dtype=np.float32),
+        "EPSG:32636",
+        transform,
+    )
+
+    res = build_site_rasters(tmp_path, _MERC, pad_px=8)
+    assert res["built"], res
+    g = res["grid"]
+    assert (g.x_min, g.y_min, g.width, g.height) == (
+        lidar.x_min,
+        lidar.y_min,
+        lidar.width,
+        lidar.height,
+    )
+    meta = json.loads((tmp_path / "samples" / "sample_meta.json").read_text(encoding="utf-8"))
+    assert meta["grid"]["width"] == lidar.width
+
+
+def test_build_repairs_meta_mismatched_with_dtm(tmp_path: Path) -> None:
+    """Мета расходится с dtm.tif — побеждает dtm, мета перезаписывается.
+
+    Именно это случилось на 001, 035, 105: rgb_* собрались по сетке из
+    разметки, мета её зафиксировала, и следующая загрузка получила
+    ресемплинг вместо лидарных пикселей.
+    """
+    _labels(tmp_path, 3_600_000.0, 6_000_000.0, size=10.0)
+
+    lidar = Grid(
+        crs="EPSG:32636", pixel_size=1.0, x_min=500_000.0, y_min=6_000_000.0, width=8, height=8
+    )
+    wrong = Grid(
+        crs="EPSG:32636", pixel_size=1.0, x_min=500_000.0, y_min=6_000_000.0, width=4, height=4
+    )
+    (tmp_path / "layers").mkdir()
+    _write_src(
+        tmp_path / "layers" / "dtm.tif",
+        np.zeros((1, 8, 8), dtype=np.float32),
+        "EPSG:32636",
+        from_origin(lidar.x_min, lidar.y_min + lidar.height, 1.0, 1.0),
+    )
+    meta = tmp_path / "samples" / "sample_meta.json"
+    meta.parent.mkdir(parents=True)
+    meta.write_text(json.dumps({"grid": asdict(wrong)}), encoding="utf-8")
+
+    (tmp_path / "04_x_SpOr_спутник").mkdir()
+    _write_src(
+        tmp_path / "04_x_SpOr_спутник" / "s.tif",
+        np.full((3, 8, 8), 90.0, dtype=np.float32),
+        "EPSG:32636",
+        from_origin(lidar.x_min, lidar.y_min + lidar.height, 1.0, 1.0),
+    )
+
+    res = build_site_rasters(tmp_path, _MERC, pad_px=8)
+    assert res["built"], res
+    assert res["grid"].width == 8, "сетка взята из меты, а не из dtm"
+    assert json.loads(meta.read_text(encoding="utf-8"))["grid"]["width"] == 8
