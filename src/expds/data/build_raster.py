@@ -48,6 +48,7 @@ PAD_PX = 64
 MIN_COVERAGE = 0.05
 NODATA = -9999.0
 READ_STEP_ROWS = 256
+_META_PATH = Path("samples") / "sample_meta.json"
 
 
 def _noop(_: str) -> None:
@@ -159,6 +160,19 @@ def _pixel_size(path: Path) -> float:
         return float(abs(ds.res[0]))
 
 
+def _grid_from_tif(path: Path) -> Grid:
+    """Сетка GeoTIFF по метаданным, без чтения пикселей."""
+    with rasterio.open(path) as ds:
+        return Grid(
+            crs=ds.crs.to_string(),
+            pixel_size=float(abs(ds.res[0])),
+            x_min=float(ds.bounds.left),
+            y_min=float(ds.bounds.bottom),
+            width=int(ds.width),
+            height=int(ds.height),
+        )
+
+
 def composite_rgb(
     site_dir: Path, grid: Grid, say: Say | None = None
 ) -> tuple[np.ndarray, float, list[str]]:
@@ -205,6 +219,57 @@ def composite_rgb(
     return out, float(covered.mean()), notes
 
 
+def site_grid(
+    site_dir: Path,
+    labels: Path,
+    labels_crs: str,
+    pixel_size: float = PIXEL_SIZE,
+    pad_px: int = PAD_PX,
+    say: Say | None = None,
+) -> tuple[Grid, str]:
+    """Сетка участка и имя её источника: meta | dtm | labels.
+
+    Приоритет источников:
+      1. samples/sample_meta.json — уже зафиксированный контракт;
+      2. layers/dtm.tif — участок собран из LAS, сетку задаёт рельеф;
+      3. разметка — участок только растровый, сетка считается впервые.
+
+    Пункт 2 обязателен: у 001, 035, 105 есть layers/dtm.tif, но
+    sample_meta.json отсутствует. Без него сетка считалась бы по разметке,
+    а записанная мета перебила бы лидарную — и 27 рельефных слоёв уехали
+    бы в ресемплинг (001: 516x775 → 202x192).
+
+    Returns:
+        (grid, source). source == "meta" — мета уже есть и актуальна,
+        писать её не нужно. "dtm" и "labels" — писать обязательно.
+    """
+    emit = say or _noop
+    meta_path = site_dir / _META_PATH
+    dtm = site_dir / "layers" / "dtm.tif"
+    lidar = _grid_from_tif(dtm) if dtm.exists() else None
+
+    if meta_path.exists():
+        grid = Grid(**json.loads(meta_path.read_text(encoding="utf-8"))["grid"])
+        if lidar is None or (grid.crs, grid.x_min, grid.y_min, grid.width, grid.height) == (
+            lidar.crs,
+            lidar.x_min,
+            lidar.y_min,
+            lidar.width,
+            lidar.height,
+        ):
+            return grid, "meta"
+        emit(
+            f"  мета не совпадает с dtm.tif: {grid.width}x{grid.height} против "
+            f"{lidar.width}x{lidar.height} — беру сетку dtm, мету перезапишу"
+        )
+        return lidar, "dtm"
+
+    if lidar is not None:
+        return lidar, "dtm"
+
+    return canonical_grid(labels, labels_crs, pixel_size, pad_px), "labels"
+
+
 def build_site_rasters(
     site_dir: Path,
     labels_crs: str,
@@ -225,7 +290,9 @@ def build_site_rasters(
         min_coverage: минимум покрытия сетки, иначе rgb_* не пишутся
             (channel_mask останется False — «не снимали», не «нули»).
         max_pixels: предохранитель от 012_Сож/058_Перынь.
-        force: пересобрать поверх готовых rgb_*.tif.
+        force: пересобрать поверх готовых rgb_*.tif. Сетка при этом
+            берётся заново по приоритету мета → dtm.tif → разметка:
+            если мета успела испортиться, --force её починит.
         log: колбэк прогресса; по умолчанию print.
 
     Returns:
@@ -239,12 +306,12 @@ def build_site_rasters(
     if not labels.exists():
         raise FileNotFoundError(labels)
 
-    say(f"  сетка: считаю по {labels.name}")
-    grid = canonical_grid(labels, labels_crs, pixel_size, pad_px)
+    say(f"  сетка: читаю {labels.name}")
+    grid, grid_src = site_grid(site_dir, labels, labels_crs, pixel_size, pad_px, say=say)
     n_px = grid.width * grid.height
     say(
-        f"  сетка: {grid.width}x{grid.height} {grid.crs} = {n_px / 1e6:.2f} Мпкс "
-        f"[{time.perf_counter() - t0:.1f} c]"
+        f"  сетка: {grid.width}x{grid.height} {grid.crs} = {n_px / 1e6:.2f} Мпкс, "
+        f"источник: {grid_src} [{time.perf_counter() - t0:.1f} c]"
     )
     if n_px > max_pixels:
         return {
@@ -278,12 +345,13 @@ def build_site_rasters(
             path=out_dir / f"{name}.tif",
         )
 
-    meta = site_dir / "samples" / "sample_meta.json"
-    meta.parent.mkdir(parents=True, exist_ok=True)
-    meta.write_text(
-        json.dumps({"grid": asdict(grid)}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if grid_src != "meta":
+        meta = site_dir / _META_PATH
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text(
+            json.dumps({"grid": asdict(grid)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     say(f"  записано [{time.perf_counter() - t0:.1f} c]")
 
     return {
