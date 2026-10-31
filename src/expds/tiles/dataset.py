@@ -101,6 +101,44 @@ def normalize_layer(layer: Layer) -> Layer:
     )
 
 
+_RGB_GROUP = ("rgb_r", "rgb_g", "rgb_b")
+
+
+def normalize_rgb_group(layers: Sequence[Layer]) -> list[Layer]:
+    """Совместная робастная нормировка rgb_*: единый масштаб на все полосы.
+
+    На поканальной нормировке красная крыша и красная трава после
+    независимого растяжения p2..p98 становятся неотличимы — три полосы
+    превращаются в три ч/б снимка. Перцентили считаются по объединению
+    валидных пикселей всех полос, масштаб применяется общий.
+    """
+    valid = [layer.valid_mask for layer in layers]
+    stacked = [layer.data[m] for layer, m in zip(layers, valid, strict=True) if m.any()]
+    if not stacked:
+        return list(layers)
+    lo, med, hi = np.percentile(np.concatenate(stacked), _ROBUST_PERCENTILES)
+    scale = float(hi - lo)
+    if scale < _SCALE_EPS:
+        scale = 1.0
+    out: list[Layer] = []
+    for layer, m in zip(layers, valid, strict=True):
+        data = layer.data.copy()
+        if m.any():
+            data[m] = (layer.data[m] - med) / scale
+        out.append(
+            Layer(
+                name=layer.name,
+                data=data.astype(np.float32, copy=False),
+                grid=layer.grid,
+                nodata=layer.nodata,
+                source=layer.source,
+                license=layer.license,
+                unit="normalized",
+            )
+        )
+    return out
+
+
 # Класс -> префиксы папок-источников, без которых он не наблюдаем.
 # Нет записи — класс виден в рельефе, наблюдаем всегда.
 # ПРЕФИКСЫ ПРОВЕРИТЬ по факту: ls -d data/raw/200_Судьбищи_2/0*/
@@ -157,12 +195,22 @@ def load_site(
     grid = _site_grid(site_dir)
 
     layers: list[Layer] = []
+    rgb_slots: list[int] = []
     for name in channels:
         path = site_dir / _LAYERS_DIR / f"{name}.tif"
         if not path.exists():
             continue
         layer = read_raster(path, grid=grid)
-        layers.append(normalize_layer(layer) if normalize == NORMALIZE_SITE_ROBUST else layer)
+        if normalize == NORMALIZE_SITE_ROBUST and name in _RGB_GROUP:
+            rgb_slots.append(len(layers))
+            layers.append(layer)
+        else:
+            layers.append(normalize_layer(layer) if normalize == NORMALIZE_SITE_ROBUST else layer)
+
+    if rgb_slots:
+        joint = normalize_rgb_group([layers[i] for i in rgb_slots])
+        for slot, normed in zip(rgb_slots, joint, strict=True):
+            layers[slot] = normed
 
     valid_path = site_dir / _LAYERS_DIR / f"{_VALID_LAYER}.tif"
     if valid_path.exists():
