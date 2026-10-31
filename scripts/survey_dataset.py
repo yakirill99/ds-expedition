@@ -246,32 +246,40 @@ def _print_table(reports: list[SiteReport]) -> None:
 
 
 def _split(reports: list[SiteReport], train_frac: float, seed: int) -> dict[str, list[str]]:
-    """Стратифицированный сплит с сохранением групп.
+    """Сплит по группам: группа целиком в train или val.
 
-    Делим по (тип участка, группа): группа целиком уходит в train или val,
-    доли выдерживаются по возможности — при малых числах проценты плавают,
-    это нормально и лучше, чем разорвать Гнёздово.
+    Делим не участки, а группы — иначе ландшафт течёт между половинами.
+    Доля выдерживается по числу объектов: группа из двух крупных участков
+    весит больше десяти мелких. Группы, которые не влезли в целевую долю,
+    уходят в val целиком, поэтому фактическая доля может отличаться
+    от train_frac — это лучше утечки.
     """
     import random
 
     rng = random.Random(seed)
     usable = [r for r in reports if r.usable]
-    buckets: dict[tuple[str, str], list[str]] = {}
-    for r in usable:
-        buckets.setdefault((r.kind, r.group), []).append(r.name)
 
+    groups: dict[tuple[str, str], list[SiteReport]] = {}
+    for r in usable:
+        groups.setdefault((r.kind, r.group), []).append(r)
+
+    def weight(members: list[SiteReport]) -> int:
+        return sum(r.src_objects or r.n_objects or 1 for r in members)
+
+    keys = sorted(groups, key=lambda k: weight(groups[k]), reverse=True)
+    rng.shuffle(keys)  # ничья по весу решается случайно
+    keys.sort(key=lambda k: weight(groups[k]), reverse=True)
+
+    target = sum(weight(groups[k]) for k in keys) * train_frac
     train: list[str] = []
     val: list[str] = []
-    for key in sorted(buckets):
-        members = sorted(buckets[key])
-        rng.shuffle(members)
-        if len(members) == 1:
-            (train if rng.random() < train_frac else val).extend(members)
-            continue
-        cut = max(1, round(len(members) * train_frac))
-        cut = min(cut, len(members) - 1)  # хотя бы один в val
-        train.extend(members[:cut])
-        val.extend(members[cut:])
+    acc = 0
+    for k in keys:
+        if acc < target:
+            train.extend(r.name for r in groups[k])
+            acc += weight(groups[k])
+        else:
+            val.extend(r.name for r in groups[k])
     return {"train_sites": sorted(train), "val_sites": sorted(val)}
 
 
