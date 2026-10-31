@@ -44,9 +44,6 @@ def main() -> int:
     for site in sites:
         if not (site / "labels.geojson").exists():
             continue
-        if (site / "layers" / "dtm.tif").exists():
-            print(f"{site.name:34} пропуск: лидарный, слои уже есть", flush=True)
-            continue
 
         print(f"\n=== {site.name}", flush=True)
         t0 = time.perf_counter()
