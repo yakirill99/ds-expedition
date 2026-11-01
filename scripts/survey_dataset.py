@@ -344,6 +344,7 @@ def main() -> int:
                     "files": r.n_files,
                     "mb": round(r.mb(), 1),
                     "objects": r.n_objects,
+                    "src_objects": r.src_objects,
                     "classes": r.classes,
                     "deep": r.deep,
                     "error": r.error or r.labels_error,

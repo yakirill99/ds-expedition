@@ -34,6 +34,7 @@ from pyproj import Transformer
 from rasterio.enums import Resampling
 from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
+from rasterio.warp import transform_bounds
 from rasterio.windows import Window
 
 from expds.data.raster import write_raster
@@ -173,6 +174,72 @@ def _grid_from_tif(path: Path) -> Grid:
         )
 
 
+def _tif_sources(site_dir: Path) -> list[Path]:
+    """Все растровые источники участка (03_/04_/05_)."""
+    tifs: list[Path] = []
+    for sub in sorted(Path(site_dir).iterdir()):
+        if sub.is_dir() and sub.name[:3] in RGB_PREFIXES:
+            tifs.extend(sorted(sub.glob("*.tif")))
+    return tifs
+
+
+def grid_from_sources(
+    site_dir: Path,
+    pixel_size: float = PIXEL_SIZE,
+    pad_px: int = PAD_PX,
+) -> Grid:
+    """Сетка по объединению bbox растровых источников участка.
+
+    Нужна там, где разметки нет: на публичной валидации строить сетку по
+    labels.geojson не из чего. Bbox берётся по метаданным GeoTIFF, пиксели
+    не читаются.
+
+    Объединение считается в UTM по центроиду всех источников: они бывают
+    в разных CRS (008_Герите — EPSG:4326, 202..207 — 32636/32637), поэтому
+    bbox каждого растра сначала приводится к WGS84 для выбора зоны, затем
+    к ней же. Перепроецируется вся рамка (transform_bounds с densify_pts),
+    а не два угла: в градусах рамка после перевода поворачивается.
+
+    На обучающих участках этот путь НЕ используется: у организаторов снимок
+    заметно шире разметки (012_Сож: 19x18 км при 49 объектах), сетка по
+    растру там дала бы 446 Мпкс. Приоритет остаётся за разметкой.
+    """
+    tifs = _tif_sources(site_dir)
+    if not tifs:
+        raise FileNotFoundError(f"{site_dir}: нет 03_/04_/05_ для построения сетки")
+
+    bounds = []
+    for tif in tifs:
+        with rasterio.open(tif) as ds:
+            bounds.append((ds.crs, ds.bounds))
+
+    # transform_bounds проходит по всей рамке (densify), а не только по двум
+    # углам: у источника в градусах (008_Герите, EPSG:4326) рамка в UTM
+    # повёрнута, и bbox по двум углам обрезал бы края снимка.
+    wgs = [transform_bounds(c, "EPSG:4326", *b, densify_pts=21) for c, b in bounds]
+    lon = sum(w[0] + w[2] for w in wgs) / (2 * len(wgs))
+    lat = sum(w[1] + w[3] for w in wgs) / (2 * len(wgs))
+    crs_out = utm_epsg(lon, lat)
+
+    utm = [transform_bounds(c, crs_out, *b, densify_pts=21) for c, b in bounds]
+    xs = [v for u in utm for v in (u[0], u[2])]
+    ys = [v for u in utm for v in (u[1], u[3])]
+
+    pad = pad_px * pixel_size
+    x0 = np.floor((min(xs) - pad) / pixel_size) * pixel_size
+    y0 = np.floor((min(ys) - pad) / pixel_size) * pixel_size
+    x1 = np.ceil((max(xs) + pad) / pixel_size) * pixel_size
+    y1 = np.ceil((max(ys) + pad) / pixel_size) * pixel_size
+    return Grid(
+        crs=crs_out,
+        pixel_size=pixel_size,
+        x_min=float(x0),
+        y_min=float(y0),
+        width=int(round((x1 - x0) / pixel_size)),
+        height=int(round((y1 - y0) / pixel_size)),
+    )
+
+
 def composite_rgb(
     site_dir: Path, grid: Grid, say: Say | None = None
 ) -> tuple[np.ndarray, float, list[str]]:
@@ -183,10 +250,7 @@ def composite_rgb(
     дублируется в три канала: цвета из него не восстановить.
     """
     emit = say or _noop
-    tifs: list[Path] = []
-    for sub in sorted(Path(site_dir).iterdir()):
-        if sub.is_dir() and sub.name[:3] in RGB_PREFIXES:
-            tifs.extend(sorted(sub.glob("*.tif")))
+    tifs = _tif_sources(site_dir)
     if not tifs:
         return (
             np.full((3, grid.height, grid.width), NODATA, np.float32),
@@ -221,23 +285,27 @@ def composite_rgb(
 
 def site_grid(
     site_dir: Path,
-    labels: Path,
+    labels: Path | None,
     labels_crs: str,
     pixel_size: float = PIXEL_SIZE,
     pad_px: int = PAD_PX,
     say: Say | None = None,
 ) -> tuple[Grid, str]:
-    """Сетка участка и имя её источника: meta | dtm | labels.
+    """Сетка участка и имя её источника: meta | dtm | labels | sources.
 
     Приоритет источников:
       1. samples/sample_meta.json — уже зафиксированный контракт;
       2. layers/dtm.tif — участок собран из LAS, сетку задаёт рельеф;
-      3. разметка — участок только растровый, сетка считается впервые.
+      3. разметка — обучающий участок, сетка по GT + отступ;
+      4. bbox растровых источников — инференс, разметки нет вовсе.
 
-    Пункт 2 обязателен: у 001, 035, 105 есть layers/dtm.tif, но
+    Пункт 2 обязателен: у 001, 035, 105, 180 есть layers/dtm.tif, но
     sample_meta.json отсутствует. Без него сетка считалась бы по разметке,
     а записанная мета перебила бы лидарную — и 27 рельефных слоёв уехали
     бы в ресемплинг (001: 516x775 → 202x192).
+
+    Пункт 4 — путь публичной валидации: там нет labels.geojson, и без него
+    build_site_rasters падал с FileNotFoundError.
 
     Returns:
         (grid, source). source == "meta" — мета уже есть и актуальна,
@@ -267,7 +335,10 @@ def site_grid(
     if lidar is not None:
         return lidar, "dtm"
 
-    return canonical_grid(labels, labels_crs, pixel_size, pad_px), "labels"
+    if labels is not None and labels.exists():
+        return canonical_grid(labels, labels_crs, pixel_size, pad_px), "labels"
+
+    return grid_from_sources(site_dir, pixel_size, pad_px), "sources"
 
 
 def build_site_rasters(
@@ -281,6 +352,11 @@ def build_site_rasters(
     log: Say | None = None,
 ) -> dict:
     """Собирает rgb_*.tif в site_dir/layers и пишет samples/sample_meta.json.
+
+    Разметка не обязательна: на публичной валидации её нет, и тогда сетка
+    строится по объединению bbox источников (grid_from_sources) вместо
+    bbox разметки. Всё остальное — мозаика, порог покрытия, запись меты —
+    работает одинаково.
 
     Args:
         site_dir: папка участка с labels.geojson.
@@ -304,9 +380,10 @@ def build_site_rasters(
     site_dir = Path(site_dir)
     labels = site_dir / "labels.geojson"
     if not labels.exists():
-        raise FileNotFoundError(labels)
+        labels = None
+        say("  разметки нет — участок для инференса, сетка по источникам")
 
-    say(f"  сетка: читаю {labels.name}")
+    say(f"  сетка: читаю {labels.name if labels else 'bbox источников'}")
     grid, grid_src = site_grid(site_dir, labels, labels_crs, pixel_size, pad_px, say=say)
     n_px = grid.width * grid.height
     say(

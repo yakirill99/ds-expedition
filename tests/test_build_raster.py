@@ -15,6 +15,7 @@ from expds.data.build_raster import (
     build_site_rasters,
     canonical_grid,
     composite_rgb,
+    grid_from_sources,
     read_to_grid,
 )
 from expds.features.grid import Grid, Layer
@@ -298,3 +299,44 @@ def test_build_repairs_meta_mismatched_with_dtm(tmp_path: Path) -> None:
     assert res["built"], res
     assert res["grid"].width == 8, "сетка взята из меты, а не из dtm"
     assert json.loads(meta.read_text(encoding="utf-8"))["grid"]["width"] == 8
+
+
+def test_grid_from_sources_without_labels(tmp_path: Path) -> None:
+    """Без разметки сетка — объединение bbox источников, а не падение.
+
+    Путь публичной валидации: labels.geojson там нет по определению.
+    """
+    (tmp_path / "04_x_SpOr_спутник").mkdir()
+    for dx in (0, 10):
+        _write_src(
+            tmp_path / "04_x_SpOr_спутник" / f"{dx}.tif",
+            np.zeros((3, 4, 4), dtype=np.float32),
+            "EPSG:32636",
+            from_origin(500_000.0 + dx, 6_000_000.0, 1.0, 1.0),
+        )
+
+    g = grid_from_sources(tmp_path, pad_px=2)
+    assert g.crs == "EPSG:32636"
+    # тайлы X 500000..500004 и 500010..500014, Y 5999996..6000000
+    # объединение + отступ 2 м: X 499998..500016, Y 5999994..6000002
+    assert (g.x_min, g.y_min) == (499_998.0, 5_999_994.0)
+    assert (g.width, g.height) == (18, 8)
+
+
+def test_build_without_labels_uses_sources(tmp_path: Path) -> None:
+    """Инференс: разметки нет — слои собираются, мета пишется."""
+    (tmp_path / "04_x_SpOr_спутник").mkdir()
+    _write_src(
+        tmp_path / "04_x_SpOr_спутник" / "s.tif",
+        np.full((3, 8, 8), 55.0, dtype=np.float32),
+        "EPSG:32636",
+        from_origin(500_000.0, 6_000_000.0, 1.0, 1.0),
+    )
+
+    res = build_site_rasters(tmp_path, _MERC, pad_px=2)
+    assert res["built"], res
+    assert res["grid"].crs == "EPSG:32636"
+    for name in ("rgb_r", "rgb_g", "rgb_b"):
+        assert (tmp_path / "layers" / f"{name}.tif").exists()
+    meta = json.loads((tmp_path / "samples" / "sample_meta.json").read_text(encoding="utf-8"))
+    assert meta["grid"]["crs"] == "EPSG:32636"
