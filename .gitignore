@@ -59,3 +59,5 @@ configs/sites/
 # Генерируется scripts/survey_dataset.py --split, зависит от локального набора
 configs/split_*.yaml
 data/survey*.json
+.#*
+*~

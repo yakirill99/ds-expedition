@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy import ndimage
 from torch.utils.data import Dataset
 
 from expds.data.raster import read_raster
@@ -38,6 +39,7 @@ _VALID_LAYER = "dtm"
 _ROBUST_PERCENTILES = (2.0, 50.0, 98.0)
 _SCALE_EPS = 1e-6
 _POS_HEATMAP_THRESHOLD = 0.5
+_FILL_MAX_DIST_PX = 3.0
 
 
 @dataclass(frozen=True, eq=False)
@@ -166,6 +168,42 @@ def class_validity(site_dir: Path, classes: Sequence[str]) -> np.ndarray:
     return out
 
 
+def _fill_nodata(layer: Layer, max_dist_px: float) -> Layer:
+    """Заполняет дыры nodata ближайшим валидным значением в пределах max_dist_px.
+
+    DTM из LiDAR приходит с сеткой тонких пропусков 1-2 px: точек на 1 м²
+    не хватило. Без заполнения объект в такой дыре рассыпается на куски
+    (в 010_Эсбю городище на 94 куска), метрика считает это fn, а модель
+    в этих пикселях видит медианную высоту — плоскую площадку.
+
+    Args:
+        layer: слой в сетке участка.
+        max_dist_px: максимальное расстояние до валидного пикселя, пиксели.
+
+    Returns:
+        Копия слоя; пиксели дальше max_dist_px остаются nodata — это
+        настоящие пропуски съёмки, заполнять их нечем.
+    """
+    inv = ~layer.valid_mask
+    if not inv.any() or max_dist_px <= 0:
+        return layer
+    dist, idx = ndimage.distance_transform_edt(inv, return_indices=True)
+    fill = inv & (dist <= max_dist_px)
+    if not fill.any():
+        return layer
+    data = layer.data.copy()
+    data[fill] = layer.data[idx[0][fill], idx[1][fill]]
+    return Layer(
+        name=layer.name,
+        data=data,
+        grid=layer.grid,
+        nodata=layer.nodata,
+        source=layer.source,
+        license=layer.license,
+        unit=layer.unit,
+    )
+
+
 def load_site(
     site_dir: Path,
     channels: Sequence[str],
@@ -201,6 +239,8 @@ def load_site(
         if not path.exists():
             continue
         layer = read_raster(path, grid=grid)
+        if name == _VALID_LAYER:
+            layer = _fill_nodata(layer, _FILL_MAX_DIST_PX)
         if normalize == NORMALIZE_SITE_ROBUST and name in _RGB_GROUP:
             rgb_slots.append(len(layers))
             layers.append(layer)
@@ -214,7 +254,7 @@ def load_site(
 
     valid_path = site_dir / _LAYERS_DIR / f"{_VALID_LAYER}.tif"
     if valid_path.exists():
-        valid = read_raster(valid_path, grid=grid).valid_mask
+        valid = _fill_nodata(read_raster(valid_path, grid=grid), _FILL_MAX_DIST_PX).valid_mask
     else:
         valid = np.ones(grid.shape, dtype=bool)
 
