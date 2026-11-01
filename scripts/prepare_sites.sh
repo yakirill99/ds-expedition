@@ -57,9 +57,13 @@ for site in "$@"; do
 
     # build_layers кладёт результат в общий кэш — переносим к участку
     if [ -d "$CACHE_DIR/layers" ]; then
-        mkdir -p "$site/layers"
+        mkdir -p "$site/layers" "$site/samples"
         mv "$CACHE_DIR"/layers/*.tif "$site/layers/" 2>/dev/null
-        cp -f "$CACHE_DIR"/samples/sample.npz "$site/samples/" 2>/dev/null
+        if [ -f "$CACHE_DIR/samples/sample.npz" ]; then
+            cp -f "$CACHE_DIR/samples/sample.npz" "$site/samples/sample.npz"
+        else
+            echo "  внимание: sample.npz не создан (для load_site не нужен)"
+        fi
         rm -rf "$CACHE_DIR"
     fi
     n_layers=$(ls "$site/layers"/*.tif 2>/dev/null | wc -l)
