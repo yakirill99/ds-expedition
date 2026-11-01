@@ -206,7 +206,7 @@ def test_build_site_raster_only(tmp_path: Path, app_cfg) -> None:
     raw.mkdir()
     for i in (1, 2, 3):
         (raw / f"SpOr_{i}.tif").write_bytes(b"")
-    with pytest.raises(RawSiteUnsupportedError, match="растровый участок"):
+    with pytest.raises(RawSiteUnsupportedError, match="нечего собрать"):
         build_site(raw, raw, app_cfg)
 
 
@@ -285,17 +285,67 @@ def test_resolve_sites_folder_mixed(tmp_path: Path, app_cfg) -> None:
 
 
 def test_resolve_sites_folder_all_raster(tmp_path: Path, app_cfg) -> None:
+    """Растровые без 03_/04_/05_ собрать нечем — пустой список, не исключение.
+
+    Раньше здесь летел RawSiteUnsupportedError, predict возвращал код 2,
+    и платформа сжигала одну из трёх попыток запуска в сутки.
+    """
     root = tmp_path / "sites"
     root.mkdir()
     for name in ("048_SpOr", "101_Li"):
         site = root / name
         site.mkdir()
         (site / "ch.tif").write_bytes(b"")
-    with pytest.raises(RawSiteUnsupportedError, match="048_SpOr"):
-        resolve_sites(root, app_cfg, Profiler())
+
+    assert resolve_sites(root, app_cfg, Profiler()) == []
 
 
 def test_resolve_sites_built_passthrough(tmp_path: Path, app_cfg) -> None:
     # готовый участок как --data: без AppConfig, без сборки
     site = _make_built_site(tmp_path, "site_1")
     assert resolve_sites(site, None, Profiler()) == [site]
+
+
+def _write_src_tif(path: Path, west: float, south: float, size: int = 200) -> None:
+    """Валидный GeoTIFF 3x(size)x(size) в EPSG:32636 — как источник организаторов."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=size,
+        height=size,
+        count=3,
+        dtype="float32",
+        crs="EPSG:32636",
+        transform=from_origin(west, south + size, 1.0, 1.0),
+    ) as dst:
+        dst.write(np.full((3, size, size), 90.0, dtype="float32"))
+
+
+def test_resolve_sites_single_raster_builds_rgb(tmp_path: Path, app_cfg) -> None:
+    """Регион платформы: снимок в подпапке 04_, разметки нет — rgb_* собираются.
+
+    Без этого 31 растровый регион из 48 давал пустой ответ: site_kind видел
+    только корень, а источник лежит в подпапке-модальности.
+    """
+    site = tmp_path / "101_SpOr"
+    _write_src_tif(site / "04_x_SpOr_спутник" / "s.tif", 500_000.0, 6_000_000.0)
+
+    assert resolve_sites(site, app_cfg, Profiler()) == [site]
+    for name in ("rgb_r", "rgb_g", "rgb_b"):
+        assert (site / "layers" / f"{name}.tif").is_file()
+    assert site_kind(site) == "built"
+
+
+def test_resolve_sites_geo_only_region_is_skipped(tmp_path: Path, app_cfg) -> None:
+    """Регион только с геофизикой (07_..09_) — пропуск, не падение."""
+    site = tmp_path / "300_MagGr"
+    (site / "07_x_MagGr").mkdir(parents=True)
+    (site / "07_x_MagGr" / "MagGr.xyz").write_text("0 0 0\n", encoding="utf-8")
+
+    assert resolve_sites(site, app_cfg, Profiler()) == []
