@@ -82,6 +82,12 @@ def merge_geojson(parts: Sequence[Path], out: Path) -> None:
     Path(out).write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
 
 
+def write_empty(out: Path, labels_crs: str) -> None:
+    """Пустой FeatureCollection в том же формате, что write_detections."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_detections(out, [], labels_crs, labels_crs)
+
+
 def run(
     config: Path,
     data: Path,
@@ -108,7 +114,17 @@ def run(
             raise ValueError(f"tiles.tile_px={cfg.tiles.tile_px} не делится на {div}")
     with prof.stage("участки"):
         app_cfg = _load_role1_if_present(Path(config))
-        sites = resolve_sites(Path(data), app_cfg, prof)
+        sites = resolve_sites(Path(data), app_cfg, prof, labels_crs=cfg.data.labels_crs)
+    if not sites:
+        logger.warning("%s: нет участков, которые можно обработать — пустой ответ", data)
+        write_empty(Path(out), cfg.data.labels_crs)
+        prof.report()
+        return {
+            "out": str(out),
+            "n_sites": 0,
+            "n_detections": 0,
+            "seconds": time.perf_counter() - t0,
+        }
     classes = cfg.targets.classes
     bs = batch_size or cfg.train.batch_size
     out = Path(out)
@@ -179,9 +195,13 @@ def main(
     try:
         stats = run(args.config, args.data, args.weights, args.out, args.device, args.batch_size)
     except RawSiteUnsupportedError as exc:
+        # Ошибка громко в лог, но запуск успешный: пустой ответ даёт FN
+        # по региону, а код != 0 сжигает одну из трёх попыток в сутки.
         logger.error("%s", exc)
-        print(f"ОШИБКА: {exc}", file=sys.stderr, flush=True)
-        return 2
+        print(f"ОШИБКА: {exc} — записан пустой FeatureCollection", file=sys.stderr, flush=True)
+        cfg = load_pipeline_config(args.config)
+        write_empty(args.out, cfg.data.labels_crs)
+        return 0
     print(
         f"OK: {stats['n_detections']} детекций, участков {stats['n_sites']}, "
         f"{stats['seconds']:.1f} с -> {stats['out']}",

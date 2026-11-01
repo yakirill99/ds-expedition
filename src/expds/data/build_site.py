@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from expds.data.build_raster import RGB_PREFIXES, build_site_rasters
 from expds.data.las import read_points
 from expds.data.raster import write_raster
 from expds.features.cloud_features import build_cloud_features
@@ -250,11 +252,8 @@ def _unsupported_message(raw_dir: Path, kind: str) -> str:
     """Человекочитаемое объяснение, почему участок не собирается."""
     if kind == "raster":
         return (
-            f"{Path(raw_dir).name}: растровый участок без лидара — автосборка слоёв "
-            "невозможна: семантика каналов (SpOr/Li/Ae/Or) не согласована с организаторами "
-            "(docs/issues/03-data-geo.md, статус 04.10.2026). "
-            f"Можно положить готовые слои руками: {raw_dir}/layers/*.tif "
-            "(формат make_synthetic)."
+            f"{Path(raw_dir).name}: нечего собрать — нет ни LAS/LAZ, ни 03_/04_/05_ "
+            "(только геофизика 07_..09_ или пустая папка). Геофизика ждёт D4.4."
         )
     return (
         f"{raw_dir}: нет ни собранных слоёв (layers/ с GeoTIFF), ни LAS/LAZ, ни растров — "
@@ -418,31 +417,120 @@ def build_site(
     )
 
 
+_MODALITY_RE = re.compile(r"^\d{2}_")
+
+
+def _has_rgb_sources(site: Path) -> bool:
+    """Есть ли подпапки 03_/04_/05_ (аэрофото, спутник, ортофото)."""
+    return any(p.is_dir() and p.name[:3] in RGB_PREFIXES for p in site.iterdir())
+
+
+def _has_modality_dirs(site: Path) -> bool:
+    """Есть ли подпапки-модальности организаторов (01_ .. 09_).
+
+    Участок датасета — NNN_Имя, источник внутри него — NN_Имя (две цифры).
+    По этому признаку регион платформы (снимок в подпапке 04_) отличается
+    от папки, в которой лежат участки.
+    """
+    return any(p.is_dir() and _MODALITY_RE.match(p.name) for p in site.iterdir())
+
+
+def _has_layers(site: Path) -> bool:
+    layers = site / _LAYERS_DIR
+    return layers.is_dir() and next(layers.glob("*.tif"), None) is not None
+
+
+def _build_rgb(site: Path, labels_crs: str, max_pixels: int, prof: Profiler) -> None:
+    """rgb_* из 03_/04_/05_, если они есть. Уже собранные не трогает."""
+    if not _has_rgb_sources(site):
+        return
+    with prof.stage(f"{site.name}: сборка rgb_* (build_site_rasters)"):
+        res = build_site_rasters(site, labels_crs, max_pixels=max_pixels, log=logger.info)
+    if not (site / _LAYERS_DIR / "rgb_r.tif").is_file():
+        logger.warning("%s: rgb_* не собраны: %s", site.name, res.get("reason"))
+
+
 def resolve_sites(
     data: Path,
     cfg: AppConfig | None,
     profiler: Profiler | None = None,
+    labels_crs: str = "EPSG:3857",
+    max_pixels: int = 12_000_000,
 ) -> list[Path]:
-    """Готовые участки + автосборка сырых лидарных (замена predict.find_sites для run).
+    """Готовые участки + автосборка сырых (лидарных и растровых).
 
     Правила:
-    - data сам участок с layers/ -> [data];
-    - data сам сырой лидарный участок (LAS прямо в корне) -> build_site
-      в него же (layers/ рядом с сырьём); если LAS лежит в подпапках —
-      укажите --data на папку, где лежит LAS;
-    - data папка участков (есть дети-участки): site с layers/ -> как есть;
-      сырой лидарный -> build_site in-place; растровый без лидара ->
-      RawSiteUnsupportedError (если готовых нет) или warning и пропуск;
-      пустые папки -> junk, пропуск;
-    - cfg=None разрешает только готовые участки (конфиг роли 1 недоступен).
+    - data участок с layers/ -> [data];
+    - data участок с сырьём (LAS в корне или подпапки 01_..09_) -> сборка
+      in-place: лидар через build_site, rgb_* через build_site_rasters;
+    - data папка участков -> обход, каждый участок по тем же правилам;
+    - участок, который собрать нельзя (только геофизика 07_..09_, снимок
+      больше max_pixels, покрытие ниже порога), -> warning и пропуск.
+      Возвращается [] — вызывающий пишет пустой FeatureCollection.
+      На платформе неуспешный запуск стоит одной из трёх попыток в сутки;
+    - cfg=None разрешает только готовые и растровые участки.
+
+    Пишет in-place, как и раньше build_site: каталог данных должен быть
+    доступен на запись.
     """
     data = Path(data)
     prof = profiler if profiler is not None else Profiler()
 
-    def _is_site_like(p: Path) -> bool:
-        return site_kind(p) != "empty"
+    if site_kind(data) == "built":
+        # У регионов La+SpOr / La+Ae рельеф собран, а rgb_* может не быть.
+        _build_rgb(data, labels_crs, max_pixels, prof)
+        return [data]
 
-    def _build_inplace(site: Path) -> None:
+    if not data.is_dir():
+        raise FileNotFoundError(f"{data}: не папка участка")
+
+    # Признак «это участок»: своё сырьё (LAS в корне либо подпапки-модальности)
+    # или отсутствие детей-участков. Иначе — папка участков.
+    own_sources = site_kind(data) == "lidar" or _has_modality_dirs(data)
+    child_sites = [
+        p
+        for p in data.iterdir()
+        if p.is_dir() and (site_kind(p) in {"built", "lidar", "raster"} or _has_modality_dirs(p))
+    ]
+    if own_sources or not child_sites:
+        return _resolve_one(data, cfg, prof, labels_crs, max_pixels)
+
+    ready: list[Path] = []
+    skipped: list[Path] = []
+    need_cfg: list[Path] = []
+    for entry in sorted(child_sites):
+        try:
+            got = _resolve_one(entry, cfg, prof, labels_crs, max_pixels)
+        except RawSiteUnsupportedError:
+            if cfg is None:
+                need_cfg.append(entry)
+                continue
+            raise
+        (ready if got else skipped).append(entry)
+
+    if skipped:
+        logger.warning(
+            "Пропущены участки, которые не собрать: %s", ", ".join(p.name for p in skipped)
+        )
+    if need_cfg:
+        raise RawSiteUnsupportedError(
+            "Сырые лидарные участки без конфига роли 1 (нужны секции dataset/lidar/ground/"
+            "dtm/relief/cloud_features): " + ", ".join(str(p) for p in need_cfg)
+        )
+    if not ready and not skipped:
+        raise FileNotFoundError(f"{data}: нет ни одного участка")
+    return ready
+
+
+def _resolve_one(
+    site: Path,
+    cfg: AppConfig | None,
+    prof: Profiler,
+    labels_crs: str,
+    max_pixels: int,
+) -> list[Path]:
+    """Собирает один участок in-place. [] — собрать нечего."""
+    if find_lidar_files(site):
         if cfg is None:
             raise RawSiteUnsupportedError(
                 f"{site}: сырой лидарный участок, но конфиг роли 1 недоступен — "
@@ -451,65 +539,9 @@ def resolve_sites(
         with prof.stage(f"{site.name}: сборка слоёв (build_site)"):
             build_site(site, site, cfg, prof)
 
-    kind = site_kind(data)
-    if kind == "built":
-        return [data]
+    _build_rgb(site, labels_crs, max_pixels, prof)
 
-    children = sorted(p for p in data.iterdir() if p.is_dir()) if data.is_dir() else []
-    if not any(_is_site_like(p) for p in children):
-        # data сам участок (не папка участков).
-        if kind == "lidar":
-            _build_inplace(data)
-            return [data]
-        if kind == "raster":
-            raise RawSiteUnsupportedError(_unsupported_message(data, kind))
-        raise FileNotFoundError(
-            f"{data}: нет ни собранных слоёв (layers/), ни LAS/LAZ прямо в папке "
-            "(сырьё LAS -> слои: expds.data.build_site.build_site; если LAS лежит "
-            "в подпапке — укажите --data на папку с LAS)"
-        )
-
-    # data — папка участков.
-    ready: list[Path] = []
-    bad_raster: list[Path] = []
-    skipped_raw: list[Path] = []
-    for entry in children:
-        if not _is_site_like(entry):
-            continue  # junk
-        k = site_kind(entry)
-        if k == "built":
-            ready.append(entry)
-        elif k == "lidar":
-            try:
-                _build_inplace(entry)
-            except RawSiteUnsupportedError:
-                if cfg is None:
-                    skipped_raw.append(entry)
-                    continue
-                raise
-            ready.append(entry)
-        elif k == "raster":
-            bad_raster.append(entry)
-
-    if bad_raster:
-        if ready:
-            logger.warning(
-                "Пропущены растровые участки без слоёв: %s (семантика каналов не согласована)",
-                ", ".join(p.name for p in bad_raster),
-            )
-        else:
-            raise RawSiteUnsupportedError(
-                "Нет ни одного готового участка. Растровые без лидара не собираются: "
-                + "; ".join(_unsupported_message(p, "raster") for p in bad_raster)
-            )
-    if skipped_raw:
-        raise RawSiteUnsupportedError(
-            "Сырые лидарные участки без конфига роли 1 (нужны секции dataset/lidar/ground/"
-            "dtm/relief/cloud_features): " + ", ".join(str(p) for p in skipped_raw)
-        )
-    if not ready:
-        raise FileNotFoundError(
-            f"{data}: нет участков с папкой layers/ и нет сырых лидарных "
-            "(сырьё LAS -> слои: expds.data.build_site.build_site)"
-        )
-    return ready
+    if _has_layers(site):
+        return [site]
+    logger.warning("%s: %s — пропуск", site.name, _unsupported_message(site, site_kind(site)))
+    return []
