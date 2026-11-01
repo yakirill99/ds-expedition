@@ -12,7 +12,7 @@ import logging
 import time
 from pathlib import Path
 
-from expds.data.build_raster import build_site_rasters
+from expds.data.build_raster import RGB_PREFIXES, build_site_rasters
 from expds.pipeline_config import load_pipeline_config
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,8 @@ def main() -> int:
     t_start = time.perf_counter()
 
     for site in sites:
-        if not (site / "labels.geojson").exists():
+        if not any(p.is_dir() and p.name[:3] in RGB_PREFIXES for p in site.iterdir()):
+            print(f"{site.name:34} пропуск: нет 03_/04_/05_", flush=True)
             continue
 
         print(f"\n=== {site.name}", flush=True)
