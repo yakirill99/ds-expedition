@@ -356,6 +356,7 @@ def build_site(
             curvature_sigmas=cfg.relief.curvature_sigmas,
             tpi_radii=cfg.relief.tpi_radii,
             tri_radii=cfg.relief.tri_radii,
+            nodata=dtm_layer.nodata,
         )
         relief_layers = {
             name: Layer(

@@ -238,3 +238,15 @@ class TestBuildDtm:
         x, y, z = _make_plane(grid=grid)
         with pytest.raises(ValueError, match="Метод"):
             build_dtm(x=x, y=y, z=z, grid=grid, config=bad)
+
+
+# Регрессионные проверки coverage, nodata и наблюдаемости классов.
+def test_regression_nearest_only_finite_donors_and_requested_targets():
+    a = np.array([[10.0, np.nan, np.nan, np.nan]], dtype=np.float32)
+    targets = np.array([[False, False, True, False]])
+    b = _fill_nearest(a, targets)
+    assert b[0, 2] == 10
+    assert np.isnan(b[0, 1]) and np.isnan(b[0, 3])
+    assert b[0, 0] == 10 and np.isnan(a[0, 2])
+    a = np.full((2, 2), np.nan, dtype=np.float32)
+    assert np.isnan(_fill_nearest(a, np.ones_like(a, dtype=bool))).all()

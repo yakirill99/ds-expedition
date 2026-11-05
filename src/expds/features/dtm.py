@@ -85,11 +85,7 @@ def _bin_points(
             f"Статистика '{statistic}' не поддерживается. Доступны: {_SUPPORTED_STATS}"
         )
 
-    col, row = grid.transform_to_pixel(x=x, y=y)
-    col_idx = np.floor(col).astype(np.int64)
-    row_idx = np.floor(row).astype(np.int64)
-
-    valid = (col_idx >= 0) & (col_idx < grid.width) & (row_idx >= 0) & (row_idx < grid.height)
+    col_idx, row_idx, valid = grid.world_to_cell(x=x, y=y)
     n_dropped = int((~valid).sum())
     if n_dropped > 0:
         logger.warning("Отброшено точек вне сетки: %d", n_dropped)
@@ -128,24 +124,23 @@ def _bin_points(
     return values.astype(np.float32), count
 
 
-def _fill_nearest(
-    values: np.ndarray,
-    mask: np.ndarray,
-) -> np.ndarray:
-    """Заполняет дыры значением ближайшей валидной ячейки.
+def _fill_nearest(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Заполняет указанные пропуски конечными донорами вне маски заполнения.
 
-    Args:
-        values: массив с nan в дырах.
-        mask: булева маска дыр (True = дыра).
-
-    Returns:
-        Заполненный массив float32.
+    Остальные ячейки, включая другие пропуски NaN, не изменяются.
+    В values пропуски должны быть представлены NaN/Inf, а не числовым nodata.
     """
-    if not mask.any():
-        return values.astype(np.float32)
-    indices = ndimage.distance_transform_edt(mask, return_distances=False, return_indices=True)
-    filled = values[tuple(indices)]
-    return filled.astype(np.float32)
+    values = np.asarray(values)
+    mask = np.asarray(mask, dtype=bool)
+    if values.ndim != 2 or mask.shape != values.shape:
+        raise ValueError("values and mask must be matching 2D arrays")
+    result = values.astype(np.float32, copy=True)
+    donors = np.isfinite(values) & ~mask
+    if not mask.any() or not donors.any():
+        return result
+    indices = ndimage.distance_transform_edt(~donors, return_distances=False, return_indices=True)
+    result[mask] = values[tuple(indices[:, mask])]
+    return result
 
 
 def _fill_idw(

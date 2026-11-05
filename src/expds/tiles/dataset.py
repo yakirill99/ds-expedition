@@ -184,9 +184,10 @@ def _fill_nodata(layer: Layer, max_dist_px: float) -> Layer:
         Копия слоя; пиксели дальше max_dist_px остаются nodata — это
         настоящие пропуски съёмки, заполнять их нечем.
     """
-    inv = ~layer.valid_mask
-    if not inv.any() or max_dist_px <= 0:
+    valid = layer.valid_mask
+    if max_dist_px <= 0 or not valid.any() or valid.all():
         return layer
+    inv = ~valid
     dist, idx = ndimage.distance_transform_edt(inv, return_indices=True)
     fill = inv & (dist <= max_dist_px)
     if not fill.any():
@@ -240,7 +241,7 @@ def load_site(
             continue
         layer = read_raster(path, grid=grid)
         if name == _VALID_LAYER:
-            layer = _fill_nodata(layer, _FILL_MAX_DIST_PX, aux=layers_aux.get("mean_z"))
+            layer = _fill_nodata(layer, _FILL_MAX_DIST_PX)
         if normalize == NORMALIZE_SITE_ROBUST and name in _RGB_GROUP:
             rgb_slots.append(len(layers))
             layers.append(layer)

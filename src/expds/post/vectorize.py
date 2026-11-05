@@ -180,8 +180,35 @@ def _split_by_peaks(comp: np.ndarray, hm_sub: np.ndarray, cfg: PostConfig) -> np
     cy, cx = np.nonzero(comp)
     pts = np.column_stack([cy, cx]).astype(np.float64)
     seeds = np.column_stack([ys, xs]).astype(np.float64)
-    d = ((pts[:, None, :] - seeds[None, :, :]) ** 2).sum(axis=2)
-    out[cy, cx] = d.argmin(axis=1) + 1
+    # Точный поиск ближайшего пика без полной матрицы расстояний.
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(seeds)
+    assigned = np.empty(len(pts), dtype=np.int32)
+
+    for start in range(0, len(pts), 4096):
+        block = pts[start : start + 4096]
+        _, idx = tree.query(block, k=2, eps=0.0)
+
+        delta = block[:, None, :] - seeds[idx]
+        d2 = (delta * delta).sum(axis=2)
+        best = idx[:, 0].copy()
+
+        # KDTree не гарантирует порядок равноудалённых соседей.
+        # Как np.argmin, выбираем минимальный исходный индекс пика.
+        for j in np.flatnonzero(d2[:, 0] == d2[:, 1]):
+            radius = np.nextafter(np.sqrt(d2[j, 0]), np.inf)
+            candidates = np.asarray(
+                tree.query_ball_point(block[j], radius, eps=0.0),
+                dtype=np.intp,
+            )
+            delta_j = seeds[candidates] - block[j]
+            exact_d2 = (delta_j * delta_j).sum(axis=1)
+            best[j] = candidates[exact_d2 == d2[j, 0]].min()
+
+        assigned[start : start + len(block)] = best + 1
+
+    out[cy, cx] = assigned
     return out
 
 
@@ -218,10 +245,12 @@ def seg_to_polygons(
         lab_sub = lab[r0:r1, c0:c1]
         full[(lab_sub > 0) & (lab_sub != i)] = 0.0
         parts = _split_by_peaks(lab_sub == i, hm[r0:r1, c0:c1], cfg)
-        for p in range(1, int(parts.max()) + 1):
+        # Площади всех частей считаем одним проходом.
+        # Маску создаём только для частей, прошедших порог площади.
+        areas = np.bincount(parts.ravel())
+        eligible = np.flatnonzero(~(areas[1:] < cfg.min_area_px)) + 1
+        for p in eligible:
             mask = parts == p
-            if mask.sum() < cfg.min_area_px:
-                continue
             sub = np.where(mask | (lab_sub == 0), full, 0.0)
             contours = find_contours(np.pad(sub, 1), cfg.seg_thr)
             if not contours:

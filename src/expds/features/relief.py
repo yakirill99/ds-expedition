@@ -397,6 +397,30 @@ def compute_tri(
 # ============================================================
 
 
+def _prepare_dtm_for_relief(
+    dtm: np.ndarray,
+    nodata: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Численное продолжение не расширяет маску наблюдаемого покрытия.
+
+    Ближайшие значения не дают числовому nodata попасть в фильтры. Это
+    не восстановление рельефа и не гарантия точности производных у пропусков.
+    """
+    raw = np.ma.asarray(dtm, dtype=np.float32)
+    data = raw.filled(np.nan)
+    if data.ndim != 2 or min(data.shape) < 2:
+        raise ValueError("relief requires a 2D DTM with both dimensions >= 2")
+    valid = np.isfinite(data) & ~np.ma.getmaskarray(raw)
+    if nodata is not None:
+        valid &= data != nodata
+    if valid.all():
+        return data.copy(), valid
+    if not valid.any():
+        return np.zeros_like(data), valid
+    indices = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+    return np.asarray(data[tuple(indices)], dtype=np.float32), valid
+
+
 def build_relief_layers(
     dtm: np.ndarray,
     pixel_size: float,
@@ -409,6 +433,7 @@ def build_relief_layers(
     curvature_sigmas: tuple[float, ...],
     tpi_radii: tuple[int, ...],
     tri_radii: tuple[int, ...],
+    nodata: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Строит все производные рельефа (итерации 1, 2, 3).
 
@@ -438,6 +463,7 @@ def build_relief_layers(
     Returns:
         Словарь слоёв.
     """
+    dtm, observed = _prepare_dtm_for_relief(dtm, nodata)
     layers: dict[str, np.ndarray] = {}
 
     slope, aspect = compute_slope_aspect(dtm=dtm, pixel_size=pixel_size)
@@ -498,4 +524,9 @@ def build_relief_layers(
         layers[name] = compute_tri(dtm=dtm, radius=radius)
         logger.info("Построен %s", name)
 
+    output_nodata = np.nan if nodata is None else nodata
+    for name, values in layers.items():
+        arr = np.array(values, dtype=np.float32, copy=True)
+        arr[~observed] = output_nodata
+        layers[name] = arr
     return layers
