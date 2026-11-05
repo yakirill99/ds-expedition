@@ -240,7 +240,7 @@ def load_site(
             continue
         layer = read_raster(path, grid=grid)
         if name == _VALID_LAYER:
-            layer = _fill_nodata(layer, _FILL_MAX_DIST_PX)
+            layer = _fill_nodata(layer, _FILL_MAX_DIST_PX, aux=layers_aux.get("mean_z"))
         if normalize == NORMALIZE_SITE_ROBUST and name in _RGB_GROUP:
             rgb_slots.append(len(layers))
             layers.append(layer)

@@ -287,7 +287,11 @@ def postprocess(
     if probs.shape[1:] != (grid.height, grid.width):
         raise ValueError(f"probs {probs.shape[1:]} vs grid ({grid.height}, {grid.width})")
     if valid is not None:
-        probs = probs * valid.astype(probs.dtype)[None]
+        # Маска nodata говорит «здесь не считай ошибку», а не «здесь ничего нет».
+        # Прямое умножение рвёт объект на куски у границы дыры (010: 94 компоненты).
+        # Закрытие 2 px убирает нити, крупные блоки остаются исключёнными.
+        m = ndimage.binary_closing(valid, structure=np.ones((3, 3), dtype=bool), iterations=2)
+        probs = probs * m.astype(probs.dtype)[None]
     dets: list[Detection] = []
     for i, cls in enumerate(classes):
         dets += seg_to_polygons(probs[i], grid, cls, cfg, hm=probs[k + i])
