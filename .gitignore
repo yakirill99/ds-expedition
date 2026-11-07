@@ -43,6 +43,11 @@ Thumbs.db
 runs/
 dist/
 
+# Артефакты отладки: бэкапы, одноразовые конфиги экспериментов
+*.bak_*
+.diagnostic-fix-backups/
+configs/overfit_*.yaml
+
 # Django
 .env
 web/db.sqlite3
@@ -59,3 +64,5 @@ configs/sites/
 # Генерируется scripts/survey_dataset.py --split, зависит от локального набора
 configs/split_*.yaml
 data/survey*.json
+.#*
+*~

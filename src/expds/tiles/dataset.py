@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy import ndimage
 from torch.utils.data import Dataset
 
 from expds.data.raster import read_raster
@@ -37,7 +38,13 @@ _META_PATH = Path("samples") / "sample_meta.json"
 _VALID_LAYER = "dtm"
 _ROBUST_PERCENTILES = (2.0, 50.0, 98.0)
 _SCALE_EPS = 1e-6
+# Предел нормированных значений: p2..p98 укладывается примерно в [-1, 1],
+# всё за пределами — выбросы, которые в модель пускать незачем.
+_NORM_CLIP = 8.0
 _POS_HEATMAP_THRESHOLD = 0.5
+# Радиус дозаполнения в лоадере. Нужен только для кэшей, собранных до
+# заполнения на этапе build_site; после пересборки не срабатывает.
+_FILL_MAX_DIST_PX = 7.0
 
 
 @dataclass(frozen=True, eq=False)
@@ -89,7 +96,10 @@ def normalize_layer(layer: Layer) -> Layer:
     if scale < _SCALE_EPS:
         scale = 1.0
     data = layer.data.copy()
-    data[valid] = (values - med) / scale
+    # Клип: масштабирование по p2..p98 не ограничивает выбросы, а один пиксель
+    # в 4000 даёт после нормировки ~1000 и уходит в свёртку. При AMP это
+    # прямой путь к переполнению fp16; в FP32 — к порче градиента.
+    data[valid] = np.clip((values - med) / scale, -_NORM_CLIP, _NORM_CLIP)
     return Layer(
         name=layer.name,
         data=data.astype(np.float32, copy=False),
@@ -124,7 +134,7 @@ def normalize_rgb_group(layers: Sequence[Layer]) -> list[Layer]:
     for layer, m in zip(layers, valid, strict=True):
         data = layer.data.copy()
         if m.any():
-            data[m] = (layer.data[m] - med) / scale
+            data[m] = np.clip((layer.data[m] - med) / scale, -_NORM_CLIP, _NORM_CLIP)
         out.append(
             Layer(
                 name=layer.name,
@@ -166,6 +176,43 @@ def class_validity(site_dir: Path, classes: Sequence[str]) -> np.ndarray:
     return out
 
 
+def _fill_nodata(layer: Layer, max_dist_px: float) -> Layer:
+    """Заполняет дыры nodata ближайшим валидным значением в пределах max_dist_px.
+
+    DTM из LiDAR приходит с сеткой тонких пропусков 1-2 px: точек на 1 м²
+    не хватило. Без заполнения объект в такой дыре рассыпается на куски
+    (в 010_Эсбю городище на 94 куска), метрика считает это fn, а модель
+    в этих пикселях видит медианную высоту — плоскую площадку.
+
+    Args:
+        layer: слой в сетке участка.
+        max_dist_px: максимальное расстояние до валидного пикселя, пиксели.
+
+    Returns:
+        Копия слоя; пиксели дальше max_dist_px остаются nodata — это
+        настоящие пропуски съёмки, заполнять их нечем.
+    """
+    valid = layer.valid_mask
+    if max_dist_px <= 0 or not valid.any() or valid.all():
+        return layer
+    inv = ~valid
+    dist, idx = ndimage.distance_transform_edt(inv, return_indices=True)
+    fill = inv & (dist <= max_dist_px)
+    if not fill.any():
+        return layer
+    data = layer.data.copy()
+    data[fill] = layer.data[idx[0][fill], idx[1][fill]]
+    return Layer(
+        name=layer.name,
+        data=data,
+        grid=layer.grid,
+        nodata=layer.nodata,
+        source=layer.source,
+        license=layer.license,
+        unit=layer.unit,
+    )
+
+
 def load_site(
     site_dir: Path,
     channels: Sequence[str],
@@ -201,6 +248,8 @@ def load_site(
         if not path.exists():
             continue
         layer = read_raster(path, grid=grid)
+        if name == _VALID_LAYER:
+            layer = _fill_nodata(layer, _FILL_MAX_DIST_PX)
         if normalize == NORMALIZE_SITE_ROBUST and name in _RGB_GROUP:
             rgb_slots.append(len(layers))
             layers.append(layer)
@@ -212,11 +261,17 @@ def load_site(
         for slot, normed in zip(rgb_slots, joint, strict=True):
             layers[slot] = normed
 
-    valid_path = site_dir / _LAYERS_DIR / f"{_VALID_LAYER}.tif"
-    if valid_path.exists():
-        valid = read_raster(valid_path, grid=grid).valid_mask
+    # valid берём из того же массива dtm, что ушёл в канал: иначе маска и
+    # данные расходятся, и лосс считает пиксели, где канал равен медиане.
+    dtm_layer = next((ly for ly in layers if ly.name == _VALID_LAYER), None)
+    if dtm_layer is not None:
+        valid = dtm_layer.valid_mask
     else:
-        valid = np.ones(grid.shape, dtype=bool)
+        valid_path = site_dir / _LAYERS_DIR / f"{_VALID_LAYER}.tif"
+        if valid_path.exists():
+            valid = _fill_nodata(read_raster(valid_path, grid=grid), _FILL_MAX_DIST_PX).valid_mask
+        else:
+            valid = np.ones(grid.shape, dtype=bool)
 
     sample = stack_layers(layers, DataSpec(grid=grid, channel_names=tuple(channels)))
 

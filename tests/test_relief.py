@@ -395,3 +395,38 @@ class TestBuildReliefLayers:
             "sky_view_factor",
         }
         assert set(layers.keys()) == expected_keys
+
+
+# Регрессионные проверки coverage, nodata и наблюдаемости классов.
+def _regression_relief(a, nodata=-9999):
+    return build_relief_layers(
+        dtm=a,
+        pixel_size=1.0,
+        hillshade_azimuths=(315.0,),
+        hillshade_altitude=45.0,
+        hillshade_z_factor=1.0,
+        slrm_sigmas=(1.0,),
+        openness_radius=1,
+        openness_n_directions=8,
+        curvature_sigmas=(1.0,),
+        tpi_radii=(1,),
+        tri_radii=(1,),
+        nodata=nodata,
+    )
+
+
+def test_regression_relief_flat_surface_and_missing_mask():
+    a = np.full((9, 9), 10.0, dtype=np.float32)
+    a[4, 4] = -9999
+    original = a.copy()
+    layers = _regression_relief(a)
+    observed = a != -9999
+    assert layers
+    for name, arr in layers.items():
+        assert arr[4, 4] == -9999, name
+        assert np.isfinite(arr[observed]).all(), name
+    assert np.max(np.abs(layers["slope"][observed])) < 1e-05
+    assert np.max(np.abs(layers["slrm_sigma_1.0"][observed])) < 1e-05
+    np.testing.assert_array_equal(a, original)
+    for arr in _regression_relief(np.full((9, 9), -9999, dtype=np.float32)).values():
+        assert (arr == -9999).all()

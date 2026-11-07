@@ -55,6 +55,10 @@ _KEY_DTM_FILL_METHOD = "fill_method"
 _KEY_DTM_IDW_K = "idw_k"
 _KEY_DTM_IDW_POWER = "idw_power"
 _KEY_DTM_MAX_HOLE_PIXELS = "max_hole_pixels"
+_KEY_DTM_FILL_MAX_DIST_PX = "fill_max_dist_px"
+
+# Радиус заполнения узких пропусков, пиксели. 4 px при 1 м/px.
+_DEFAULT_FILL_MAX_DIST_PX = 4.0
 _KEY_DTM_ARTIFACT_WINDOW = "artifact_window"
 _KEY_DTM_ARTIFACT_THRESHOLD = "artifact_threshold"
 
@@ -142,6 +146,8 @@ class DtmConfig:
     max_hole_pixels: int
     artifact_window: int
     artifact_threshold: float
+    # Радиус заполнения узких пропусков, пиксели (build_site, до производных).
+    fill_max_dist_px: float = _DEFAULT_FILL_MAX_DIST_PX
 
 
 @dataclass(frozen=True)
@@ -294,6 +300,8 @@ def load_config(path: Path) -> AppConfig:
         idw_k=int(dtm_raw[_KEY_DTM_IDW_K]),
         idw_power=float(dtm_raw[_KEY_DTM_IDW_POWER]),
         max_hole_pixels=int(dtm_raw[_KEY_DTM_MAX_HOLE_PIXELS]),
+        # Необязательный ключ: старые конфиги его не содержат.
+        fill_max_dist_px=float(dtm_raw.get(_KEY_DTM_FILL_MAX_DIST_PX, _DEFAULT_FILL_MAX_DIST_PX)),
         artifact_window=int(dtm_raw[_KEY_DTM_ARTIFACT_WINDOW]),
         artifact_threshold=float(dtm_raw[_KEY_DTM_ARTIFACT_THRESHOLD]),
     )

@@ -227,3 +227,77 @@ def test_iou_subtracts_holes():
     disk = EvalObject("mound", "Polygon", (circle(r_out),))
     iou = polygon_iou(donut.rings, disk.rings, 256)
     assert abs(iou - (r_out**2 - r_in**2) / r_out**2) < 0.02
+
+
+# Проверки эквивалентности ускоренной постобработки.
+def test_regression_centroids_and_nms_match_scalar(monkeypatch):
+    """Пакетные центроиды и NMS сохраняют результат скалярного пути."""
+    from expds.post import nms as nms_module
+
+    origin = np.array([500000.0, 6200000.0])
+    square = np.array([[0.0, 0.0], [8.0, 0.0], [8.0, 8.0], [0.0, 8.0]])
+    triangle = np.array([[0.0, 0.0], [6.0, 0.0], [0.0, 3.0]])
+    line = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    angle = np.linspace(0, 2 * np.pi, 129, endpoint=False)
+    large = np.column_stack([np.cos(angle), np.sin(angle)])
+    rings = [square, square[::-1], triangle, line, large]
+    dets = []
+    for i, ring in enumerate(rings):
+        for offset in (0.0, 1.0, 30.0):
+            dets.append(
+                Detection(
+                    cls="a" if i % 2 else "b",
+                    score=1.0 - len(dets) * 0.01,
+                    geom_type="Polygon",
+                    geometry=ring + origin + offset,
+                )
+            )
+    hole = np.array([[1.0, 1.0], [1.0, 2.0], [3.0, 2.0], [3.0, 1.0]])
+    dets.append(
+        Detection(
+            cls="b",
+            score=0.7,
+            geom_type="Polygon",
+            geometry=square + origin,
+            holes=(hole + origin,),
+        )
+    )
+    dets.append(
+        Detection(cls="a", score=0.6, geom_type="Point", geometry=np.array([[500100.0, 6200100.0]]))
+    )
+
+    def scalar(ds):
+        return np.asarray([d.centroid for d in ds], dtype=np.float64)
+
+    expected = scalar(dets)
+    np.testing.assert_allclose(nms_module._centroids_batched(dets), expected, rtol=0, atol=1e-8)
+    for per_class in (True, False):
+        accelerated = nms_module.nms_centroids(dets, radius=5.0, per_class=per_class)
+        with monkeypatch.context() as patch:
+            patch.setattr(nms_module, "_centroids_batched", scalar)
+            reference = nms_module.nms_centroids(dets, radius=5.0, per_class=per_class)
+        assert [id(d) for d in accelerated] == [id(d) for d in reference]
+
+
+@pytest.mark.parametrize(
+    "seeds", [[], [(4, 4)], [(4, 2), (4, 6)], [(2, 2), (2, 6), (6, 2), (6, 6)]]
+)
+def test_regression_peak_split_matches_dense_argmin(seeds):
+    """Равноудалённые пиксели получают минимальный исходный индекс пика."""
+    from expds.post.vectorize import _split_by_peaks
+
+    comp = np.ones((9, 9), dtype=bool)
+    comp[0, 0] = False
+    hm = np.zeros(comp.shape, dtype=np.float32)
+    for r, c in seeds:
+        hm[r, c] = 1.0
+    actual = _split_by_peaks(comp, hm, PostConfig(hm_thr=0.5, peak_window_px=3))
+    expected = np.zeros(comp.shape, dtype=np.int32)
+    rr, cc = np.nonzero(comp)
+    if len(seeds) < 2:
+        expected[rr, cc] = 1
+    else:
+        points = np.column_stack([rr, cc])
+        distances = ((points[:, None, :] - np.asarray(seeds)[None, :, :]) ** 2).sum(2)
+        expected[rr, cc] = distances.argmin(1) + 1
+    np.testing.assert_array_equal(actual, expected)

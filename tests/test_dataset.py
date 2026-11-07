@@ -179,3 +179,19 @@ def test_class_validity_masks_unobservable(tmp_path: Path) -> None:
     (tmp_path / "07_site_MagGr").mkdir()
     v = class_validity(tmp_path, classes)
     assert v.tolist() == [1.0, 1.0, 0.0]
+
+
+# Проверки заполнения nodata без выдуманных доноров.
+def test_regression_fill_nodata_without_donors():
+    """Полностью отсутствующее покрытие не превращается в наблюдаемые данные."""
+    from expds.features.grid import Layer
+    from expds.tiles.dataset import _fill_nodata
+
+    grid = Grid(crs="EPSG:3857", pixel_size=1.0, x_min=0.0, y_min=0.0, width=3, height=3)
+    for value in (-9999.0, np.nan):
+        layer = Layer(
+            name="dtm", data=np.full((3, 3), value, dtype=np.float32), grid=grid, nodata=-9999.0
+        )
+        result = _fill_nodata(layer, 3.0)
+        assert not result.valid_mask.any()
+        np.testing.assert_array_equal(result.data, layer.data)

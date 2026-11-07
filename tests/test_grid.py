@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from expds.features.cloud_features import _bin_indices
+from expds.features.dtm import _bin_points
 from expds.features.grid import DataSpec, Grid, Layer, Sample, stack_layers
 
 
@@ -273,3 +275,34 @@ class TestGridToAffine:
 
         assert x_rasterio == pytest.approx(x_grid)
         assert y_rasterio == pytest.approx(y_grid)
+
+
+# Регрессионные проверки coverage, nodata и наблюдаемости классов.
+def _regression_grid():
+    return Grid(crs="EPSG:3857", pixel_size=1.0, x_min=0.0, y_min=0.0, width=3, height=3)
+
+
+def test_regression_cell_edges_and_nonfinite():
+    g = _regression_grid()
+    x = np.array([0.0, 0.1, 0.49, 0.5, 0.99, 1.0, 2.99, 3.0, -0.01, np.nan])
+    c, r, v = g.world_to_cell(x, np.full_like(x, 0.1))
+    np.testing.assert_array_equal(c, [0, 0, 0, 0, 0, 1, 2, -1, -1, -1])
+    np.testing.assert_array_equal(v, [1] * 7 + [0] * 3)
+    assert np.all(r[v] == 0)
+    rr, cc, vv = _bin_indices(x, np.full_like(x, 0.1), g)
+    np.testing.assert_array_equal(rr, r)
+    np.testing.assert_array_equal(cc, c)
+    np.testing.assert_array_equal(vv, v)
+    data, counts = _bin_points(
+        np.array([0.1, 1.1]), np.array([0.1, 0.1]), np.array([10.0, 20.0]), g, "mean"
+    )
+    assert data[0, 0] == 10 and data[0, 1] == 20
+    assert counts.sum() == 2
+
+
+def test_regression_layer_mask_excludes_nan_and_inf():
+    a = np.ones((3, 3), dtype=np.float32)
+    a[0] = [-9999, np.nan, np.inf]
+    layer = Layer(name="test", data=a, grid=_regression_grid(), nodata=-9999)
+    assert not layer.valid_mask[0].any()
+    assert layer.valid_mask[1:].all()

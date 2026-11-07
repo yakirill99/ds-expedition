@@ -155,12 +155,82 @@ def _component_holes(
     return tuple(holes)
 
 
+def _split_by_peaks(comp: np.ndarray, hm_sub: np.ndarray, cfg: PostConfig) -> np.ndarray:
+    """Делит компонент по ближайшему пику тепловой карты внутри него.
+
+    Args:
+        comp: (h, w) bool — маска одного компонента.
+        hm_sub: (h, w) float — та же область тепловой карты того же класса.
+        cfg: параметры постобработки (peak_window_px, hm_thr).
+
+    Returns:
+        (h, w) int32: 0 вне компонента, 1..N — номер части по числу пиков.
+
+    Зачем: y_seg растеризует соприкасающиеся полигоны в одну маску, label()
+    даёт один компонент на 2-4 кургана. Разделение по пикам hm возвращает
+    их число; без него IoU блоба с каждым объектом < 0.5 и все уходят в fn.
+    """
+    mx = ndimage.maximum_filter(hm_sub, size=cfg.peak_window_px, mode="constant", cval=0.0)
+    peaks = (hm_sub >= mx) & (hm_sub >= cfg.hm_thr) & comp
+    ys, xs = np.nonzero(peaks)
+    out = np.zeros(comp.shape, dtype=np.int32)
+    if len(ys) < 2:
+        out[comp] = 1
+        return out
+    cy, cx = np.nonzero(comp)
+    pts = np.column_stack([cy, cx]).astype(np.float64)
+    seeds = np.column_stack([ys, xs]).astype(np.float64)
+    # Точный поиск ближайшего пика без полной матрицы расстояний.
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(seeds)
+    assigned = np.empty(len(pts), dtype=np.int32)
+
+    for start in range(0, len(pts), 4096):
+        block = pts[start : start + 4096]
+        _, idx = tree.query(block, k=2, eps=0.0)
+
+        delta = block[:, None, :] - seeds[idx]
+        d2 = (delta * delta).sum(axis=2)
+        best = idx[:, 0].copy()
+
+        # KDTree не гарантирует порядок равноудалённых соседей.
+        # Как np.argmin, выбираем минимальный исходный индекс пика.
+        for j in np.flatnonzero(d2[:, 0] == d2[:, 1]):
+            radius = np.nextafter(np.sqrt(d2[j, 0]), np.inf)
+            candidates = np.asarray(
+                tree.query_ball_point(block[j], radius, eps=0.0),
+                dtype=np.intp,
+            )
+            delta_j = seeds[candidates] - block[j]
+            exact_d2 = (delta_j * delta_j).sum(axis=1)
+            best[j] = candidates[exact_d2 == d2[j, 0]].min()
+
+        assigned[start : start + len(block)] = best + 1
+
+    out[cy, cx] = assigned
+    return out
+
+
 # --- seg-голова ----------------------------------------------------------------
 
 
-def seg_to_polygons(prob: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> list[Detection]:
-    """(H, W) вероятность одного класса -> полигоны компонент (внешний CCW + дыры CW)."""
+def seg_to_polygons(
+    prob: np.ndarray,
+    grid: Grid,
+    cls: str,
+    cfg: PostConfig,
+    hm: np.ndarray | None = None,
+) -> list[Detection]:
+    """(H, W) вероятность и heatmap одного класса -> полигоны компонент.
+
+    Компонент, внутри которого больше одного пика hm, делится по ближайшему
+    пику: растеризация y_seg склеивает соприкасающиеся полигоны, без деления
+    каждый блоб даёт один fp и N fn.
+    """
     h, w = prob.shape
+    if hm is None:
+        hm = np.zeros((h, w), dtype=prob.dtype)
     lab, n = ndimage.label(prob >= cfg.seg_thr, structure=_EIGHT)
     dets: list[Detection] = []
     for i, sl in enumerate(ndimage.find_objects(lab), start=1):
@@ -171,23 +241,31 @@ def seg_to_polygons(prob: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> 
             continue
         r0, r1 = max(sl[0].start - 1, 0), min(sl[0].stop + 1, h)
         c0, c1 = max(sl[1].start - 1, 0), min(sl[1].stop + 1, w)
-        sub = prob[r0:r1, c0:c1].astype(np.float64)
+        full = prob[r0:r1, c0:c1].astype(np.float64)
         lab_sub = lab[r0:r1, c0:c1]
-        sub[(lab_sub > 0) & (lab_sub != i)] = 0.0
-        contours = find_contours(np.pad(sub, 1), cfg.seg_thr)
-        if not contours:
-            continue
-        outer = max(contours, key=lambda c: abs(_signed_area(c)))
-        rc = outer + np.array([r0 - 1, c0 - 1], dtype=np.float64)
-        rc = simplify_ring(rc, cfg.simplify_px)
-        if len(rc) < 4:
-            continue
-        ring = _ccw(_pix_to_world(rc[:-1], grid))
-        holes = _component_holes(contours, outer, r0, c0, grid, cfg)
-        score = float(prob[sl][comp].mean())
-        dets.append(
-            Detection(cls=cls, score=score, geom_type="Polygon", geometry=ring, holes=holes)
-        )
+        full[(lab_sub > 0) & (lab_sub != i)] = 0.0
+        parts = _split_by_peaks(lab_sub == i, hm[r0:r1, c0:c1], cfg)
+        # Площади всех частей считаем одним проходом.
+        # Маску создаём только для частей, прошедших порог площади.
+        areas = np.bincount(parts.ravel())
+        eligible = np.flatnonzero(~(areas[1:] < cfg.min_area_px)) + 1
+        for p in eligible:
+            mask = parts == p
+            sub = np.where(mask | (lab_sub == 0), full, 0.0)
+            contours = find_contours(np.pad(sub, 1), cfg.seg_thr)
+            if not contours:
+                continue
+            outer = max(contours, key=lambda c: abs(_signed_area(c)))
+            rc = outer + np.array([r0 - 1, c0 - 1], dtype=np.float64)
+            rc = simplify_ring(rc, cfg.simplify_px)
+            if len(rc) < 4:
+                continue
+            ring = _ccw(_pix_to_world(rc[:-1], grid))
+            holes = _component_holes(contours, outer, r0, c0, grid, cfg)
+            score = float(prob[r0:r1, c0:c1][mask].mean())
+            dets.append(
+                Detection(cls=cls, score=score, geom_type="Polygon", geometry=ring, holes=holes)
+            )
     return dets
 
 
@@ -238,9 +316,13 @@ def postprocess(
     if probs.shape[1:] != (grid.height, grid.width):
         raise ValueError(f"probs {probs.shape[1:]} vs grid ({grid.height}, {grid.width})")
     if valid is not None:
-        probs = probs * valid.astype(probs.dtype)[None]
+        # Маска nodata говорит «здесь не считай ошибку», а не «здесь ничего нет».
+        # Прямое умножение рвёт объект на куски у границы дыры (010: 94 компоненты).
+        # Закрытие 2 px убирает нити, крупные блоки остаются исключёнными.
+        m = ndimage.binary_closing(valid, structure=np.ones((3, 3), dtype=bool), iterations=2)
+        probs = probs * m.astype(probs.dtype)[None]
     dets: list[Detection] = []
     for i, cls in enumerate(classes):
-        dets += seg_to_polygons(probs[i], grid, cls, cfg)
+        dets += seg_to_polygons(probs[i], grid, cls, cfg, hm=probs[k + i])
         dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
     return nms_centroids(dets, cfg.nms_radius_px * grid.pixel_size)[: cfg.max_detections]

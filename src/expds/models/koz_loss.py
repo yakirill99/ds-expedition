@@ -66,41 +66,62 @@ class KozLoss(nn.Module):
         c = self.cfg
         heads = split_heads(logits.float(), self.k)
         seg, hm = heads["seg"], heads["hm"]
-        y_seg, y_hm = y_seg.float(), y_hm.float()
+        y_seg = y_seg.to(device=seg.device, dtype=seg.dtype)
+        y_hm = y_hm.to(device=hm.device, dtype=hm.dtype)
+        if y_seg.shape != seg.shape or y_hm.shape != hm.shape:
+            raise ValueError("Target shapes must match their respective heads")
+        b, k, h, w = seg.shape
         if valid is None:
             m = torch.ones_like(seg[:, :1])
         else:
-            m = valid.to(seg.dtype).reshape(seg.shape[0], 1, *seg.shape[2:])
-        n_px = m.sum().clamp_min(1.0)
+            if valid.shape != (b, h, w):
+                raise ValueError(f"valid: expected {(b, h, w)}, got {tuple(valid.shape)}")
+            m = valid.to(device=seg.device, dtype=seg.dtype).unsqueeze(1)
+            if not torch.isfinite(m).all() or not ((m == 0) | (m == 1)).all():
+                raise ValueError("valid must be a finite binary mask")
 
-        # Веса классов: нормируем на сумму, чтобы масштаб лосса не зависел
-        # от числа активных классов в батче.
+        # Учитываем наблюдаемость класса до редукции по батчу.
         if y_valid is None:
-            wv = torch.full((self.k,), 1.0 / self.k, device=seg.device, dtype=seg.dtype)
+            observed = torch.ones((b, k), device=seg.device, dtype=seg.dtype)
         else:
-            v = y_valid.to(seg.dtype).reshape(-1)[: self.k].clamp(0.0, 1.0)
-            total = v.sum()
-            wv = v / total if total > 0 else torch.full_like(v, 1.0 / self.k)
+            observed = y_valid.to(device=seg.device, dtype=seg.dtype)
+            if observed.shape == (k,):
+                observed = observed.unsqueeze(0).expand(b, k)
+            elif observed.shape == (1, k):
+                observed = observed.expand(b, k)
+            elif observed.shape != (b, k):
+                raise ValueError(
+                    f"y_valid: expected {(k,)}, {(1, k)} or {(b, k)}, got {tuple(observed.shape)}"
+                )
+            if not torch.isfinite(observed).all():
+                raise ValueError("y_valid must contain finite values")
+            observed = observed.clamp(0.0, 1.0)
+
+        mask = m * observed[:, :, None, None]
+        axes = (0, 2, 3)
+        counts = mask.sum(dim=axes)
+        # Полностью ненаблюдаемый класс даёт ноль, а не лосс по фону.
+        weights = (counts > 0).to(seg.dtype)
+        weights = weights / weights.sum().clamp_min(1.0)
+        n_px = counts.clamp_min(1.0)
 
         p = torch.sigmoid(seg)
-        pm, tm = p * m, y_seg * m
-        inter = (pm * tm).sum(dim=(0, 2, 3))
-        den = pm.sum(dim=(0, 2, 3)) + tm.sum(dim=(0, 2, 3))
-        dice_k = 1.0 - ((2.0 * inter + c.smooth) / (den + c.smooth))
-        dice = (dice_k * wv).sum()
+        inter = (p * y_seg * mask).sum(dim=axes)
+        den = (p * mask).sum(dim=axes) + (y_seg * mask).sum(dim=axes)
+        dice_k = 1.0 - (2.0 * inter + c.smooth) / (den + c.smooth)
+        dice = (dice_k * weights).sum()
 
         bce = F.binary_cross_entropy_with_logits(seg, y_seg, reduction="none")
         p_t = p * y_seg + (1 - p) * (1 - y_seg)
         a_t = c.focal_alpha * y_seg + (1 - c.focal_alpha) * (1 - y_seg)
-        focal_k = (a_t * (1 - p_t).pow(c.focal_gamma) * bce * m).sum(dim=(0, 2, 3)) / n_px
-        focal = (focal_k * wv).sum()
+        focal_k = (a_t * (1 - p_t).pow(c.focal_gamma) * bce * mask).sum(dim=axes) / n_px
+        focal = (focal_k * weights).sum()
 
         q = torch.sigmoid(hm)
         bce_h = F.binary_cross_entropy_with_logits(hm, y_hm, reduction="none")
-        hm_num = ((q - y_hm).abs().pow(c.hm_beta) * bce_h * m).sum(dim=(0, 2, 3))
-        hm_den = (y_hm * m).sum(dim=(0, 2, 3)).clamp_min(c.hm_min_norm)
-        hm_loss = ((hm_num / hm_den) * wv).sum()
-
+        hm_num = ((q - y_hm).abs().pow(c.hm_beta) * bce_h * mask).sum(dim=axes)
+        hm_den = (y_hm * mask).sum(dim=axes).clamp_min(c.hm_min_norm)
+        hm_loss = ((hm_num / hm_den) * weights).sum()
         total = (
             c.seg_weight * (c.dice_weight * dice + c.focal_weight * focal) + c.hm_weight * hm_loss
         )

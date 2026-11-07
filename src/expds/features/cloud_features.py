@@ -80,11 +80,7 @@ def _bin_indices(
         Кортеж (row_idx, col_idx, valid). row_idx, col_idx — int64,
         valid — булев массив той же длины, что x и y.
     """
-    col, row = grid.transform_to_pixel(x=x, y=y)
-    col_idx = np.floor(col).astype(np.int64)
-    row_idx = np.floor(row).astype(np.int64)
-
-    valid = (col_idx >= 0) & (col_idx < grid.width) & (row_idx >= 0) & (row_idx < grid.height)
+    col_idx, row_idx, valid = grid.world_to_cell(x=x, y=y)
     return row_idx, col_idx, valid
 
 

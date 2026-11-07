@@ -99,4 +99,7 @@ def test_unknown_class_skipped_and_types_split(tmp_path: Path) -> None:
     y_seg, y_hm = labels_to_targets(feats, _GRID, _CLASSES, sigma_px=1.5)
     assert y_seg[0].sum() == 16 and y_seg[1].sum() == 0  # rampart пропущен
     assert y_hm[0, 0, 0] == np.float32(1.0)  # точка у края — без падения
-    assert y_hm[0, :, 30:].sum() == 0  # полигон в heatmap не попадает
+    # hm-голова: центры всех объектов. Полигон даёт ровно один гаусс по центроиду.
+    assert y_hm[0].max() == np.float32(1.0)
+    assert y_hm[0, :, 30:].sum() > 0
+    assert y_hm[1].sum() == 0  # rampart пропущен и в heatmap

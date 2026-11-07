@@ -145,13 +145,21 @@ def points_to_heatmap(
     skipped: set[str] = set()
 
     for feat in features:
-        if feat.geom_type != GEOM_POINT:
+        if feat.geom_type == GEOM_POINT:
+            col, row = feat.pixel[0][0]
+        elif feat.geom_type == GEOM_POLYGON:
+            if not feat.pixel:
+                continue
+            cx, cy = feat.centroid_world
+            ps = grid.pixel_size
+            col = (float(cx) - grid.x_min) / ps - 0.5
+            row = (float(cy) - grid.y_min) / ps - 0.5
+        else:
             continue
         k = index.get(feat.cls)
         if k is None:
             skipped.add(feat.cls)
             continue
-        col, row = feat.pixel[0][0]
         win = _window(col - radius, col + radius, row - radius, row + radius, grid)
         if win is None:
             continue

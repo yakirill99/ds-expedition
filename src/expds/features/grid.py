@@ -104,6 +104,31 @@ class Grid:
         row = (np.asarray(y) - self.y_min) / self.pixel_size - 0.5
         return col, row
 
+    def world_to_cell(
+        self,
+        x: np.ndarray | float,
+        y: np.ndarray | float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Определяет ячейки по их границам, а не координатам центров.
+
+        Левая/нижняя границы включены, правая/верхняя исключены; вне сетки индекс -1.
+        Метод transform_to_pixel() для геометрий остаётся без изменений.
+        """
+        x, y = np.broadcast_arrays(np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64))
+        cx = (x - self.x_min) / self.pixel_size
+        ry = (y - self.y_min) / self.pixel_size
+        valid = (
+            np.isfinite(cx)
+            & np.isfinite(ry)
+            & (cx >= 0)
+            & (cx < self.width)
+            & (ry >= 0)
+            & (ry < self.height)
+        )
+        cols = np.floor(np.where(valid, cx, -1)).astype(np.int64)
+        rows = np.floor(np.where(valid, ry, -1)).astype(np.int64)
+        return cols, rows, valid
+
     def transform_to_world(
         self,
         col: np.ndarray | float,
@@ -243,7 +268,7 @@ class Layer:
     @property
     def valid_mask(self) -> np.ndarray:
         """Булева маска валидных пикселей (не nodata)."""
-        return self.data != self.nodata
+        return np.isfinite(self.data) & (self.data != self.nodata)
 
 
 @dataclass(frozen=True)
