@@ -38,8 +38,13 @@ _META_PATH = Path("samples") / "sample_meta.json"
 _VALID_LAYER = "dtm"
 _ROBUST_PERCENTILES = (2.0, 50.0, 98.0)
 _SCALE_EPS = 1e-6
+# Предел нормированных значений: p2..p98 укладывается примерно в [-1, 1],
+# всё за пределами — выбросы, которые в модель пускать незачем.
+_NORM_CLIP = 8.0
 _POS_HEATMAP_THRESHOLD = 0.5
-_FILL_MAX_DIST_PX = 3.0
+# Радиус дозаполнения в лоадере. Нужен только для кэшей, собранных до
+# заполнения на этапе build_site; после пересборки не срабатывает.
+_FILL_MAX_DIST_PX = 7.0
 
 
 @dataclass(frozen=True, eq=False)
@@ -91,7 +96,10 @@ def normalize_layer(layer: Layer) -> Layer:
     if scale < _SCALE_EPS:
         scale = 1.0
     data = layer.data.copy()
-    data[valid] = (values - med) / scale
+    # Клип: масштабирование по p2..p98 не ограничивает выбросы, а один пиксель
+    # в 4000 даёт после нормировки ~1000 и уходит в свёртку. При AMP это
+    # прямой путь к переполнению fp16; в FP32 — к порче градиента.
+    data[valid] = np.clip((values - med) / scale, -_NORM_CLIP, _NORM_CLIP)
     return Layer(
         name=layer.name,
         data=data.astype(np.float32, copy=False),
@@ -126,7 +134,7 @@ def normalize_rgb_group(layers: Sequence[Layer]) -> list[Layer]:
     for layer, m in zip(layers, valid, strict=True):
         data = layer.data.copy()
         if m.any():
-            data[m] = (layer.data[m] - med) / scale
+            data[m] = np.clip((layer.data[m] - med) / scale, -_NORM_CLIP, _NORM_CLIP)
         out.append(
             Layer(
                 name=layer.name,
@@ -253,11 +261,17 @@ def load_site(
         for slot, normed in zip(rgb_slots, joint, strict=True):
             layers[slot] = normed
 
-    valid_path = site_dir / _LAYERS_DIR / f"{_VALID_LAYER}.tif"
-    if valid_path.exists():
-        valid = _fill_nodata(read_raster(valid_path, grid=grid), _FILL_MAX_DIST_PX).valid_mask
+    # valid берём из того же массива dtm, что ушёл в канал: иначе маска и
+    # данные расходятся, и лосс считает пиксели, где канал равен медиане.
+    dtm_layer = next((ly for ly in layers if ly.name == _VALID_LAYER), None)
+    if dtm_layer is not None:
+        valid = dtm_layer.valid_mask
     else:
-        valid = np.ones(grid.shape, dtype=bool)
+        valid_path = site_dir / _LAYERS_DIR / f"{_VALID_LAYER}.tif"
+        if valid_path.exists():
+            valid = _fill_nodata(read_raster(valid_path, grid=grid), _FILL_MAX_DIST_PX).valid_mask
+        else:
+            valid = np.ones(grid.shape, dtype=bool)
 
     sample = stack_layers(layers, DataSpec(grid=grid, channel_names=tuple(channels)))
 

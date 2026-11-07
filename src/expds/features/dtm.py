@@ -42,6 +42,11 @@ _SUPPORTED_FILLS = (_FILL_IDW, _FILL_NEAREST)
 # Константа: nodata для DTM (в метрах, ниже любого реального рельефа).
 _DTM_NODATA = -9999.0
 
+# Максимальное расстояние (px) от пропуска до валидных данных, на котором
+# пропуск считается артефактом плотности точек и заполняется. Дальше — это
+# настоящая пустая площадь, там заполнение было бы выдумкой.
+_DTM_FILL_MAX_DIST_PX = 4.0
+
 # Константа: минимальное число точек для статистики.
 _MIN_POINTS_FOR_MEDIAN = 1
 
@@ -226,6 +231,68 @@ def _filter_large_holes(
         max_hole_pixels,
     )
     return big_mask
+
+
+def fill_narrow_gaps(
+    values: np.ndarray,
+    nodata: float,
+    grid: Grid | None = None,
+    max_dist_px: float = _DTM_FILL_MAX_DIST_PX,
+    method: str = _FILL_IDW,
+    k: int = 8,
+    power: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Заполняет узкие пропуски, широкие оставляет nodata.
+
+    Критерий узости — расстояние от пикселя до ближайших валидных данных, а не
+    размер связной компоненты. Пропуски LiDAR в лесной съёмке образуют сеть
+    тонких нитей 1-3 px, и все они связаны в одну 8-связную компоненту. Поэтому
+    критерий по площади отправлял в nodata всю сеть целиком: на 010_Эсбю так
+    терялось 90% пропусков, хотя каждое сечение нити — 3 пикселя.
+
+    Метод по умолчанию — IDW, а не ближайший сосед. На синтетике с курганом
+    1.2 м и нитями 1-3 px nearest даёт среднюю ошибку 0.56-0.93 м (46-78%
+    амплитуды объекта), IDW k=8 — 0.39-0.85 м (32-71%). Nearest кладёт в
+    пропуск значение с одной стороны, IDW интерполирует вдоль поверхности.
+
+    Вызывать ДО расчёта производных рельефа. Тогда slope/aspect/hillshade/TPI
+    считаются по непрерывной поверхности, и все каналы согласованы. Иначе
+    рассинхрон: dtm заполнен, производные равны 0 (после нормировки это
+    медиана), а valid=True — и лосс считает эти пиксели настоящими данными.
+
+    Args:
+        values: 2D массив высот с nodata в пропусках.
+        nodata: числовое значение nodata.
+        grid: сетка участка (нужна для IDW, чтобы считать расстояния в метрах).
+        max_dist_px: максимальное расстояние до валидных данных, пиксели.
+        method: "idw" | "nearest".
+        k: число соседей для IDW.
+        power: степень расстояния для IDW.
+
+    Returns:
+        (заполненный массив float32, маска заполненных пикселей).
+    """
+    array = np.asarray(values, dtype=np.float32)
+    holes = ~np.isfinite(array) | (array == nodata)
+    empty = np.zeros(array.shape, dtype=bool)
+    if not holes.any() or holes.all() or max_dist_px <= 0:
+        return array.copy(), empty
+
+    distance = ndimage.distance_transform_edt(holes)
+    fillable = holes & (distance <= max_dist_px)
+    if not fillable.any():
+        return array.copy(), empty
+
+    donors = np.where(holes, np.nan, array)
+    use_idw = method == _FILL_IDW and grid is not None
+    filled = (
+        _fill_idw(values=donors, mask=fillable, grid=grid, k=k, power=power)
+        if use_idw
+        else _fill_nearest(values=donors, mask=fillable)
+    )
+    out = np.where(fillable, filled, array).astype(np.float32)
+    out[holes & ~fillable] = nodata
+    return out, fillable
 
 
 def detect_artifacts(

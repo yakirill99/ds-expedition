@@ -37,7 +37,7 @@ from expds.data.las import read_points
 from expds.data.raster import write_raster
 from expds.features.cloud_features import build_cloud_features
 from expds.features.config import AppConfig
-from expds.features.dtm import build_dtm
+from expds.features.dtm import build_dtm, fill_narrow_gaps
 from expds.features.grid import DataSpec, Grid, Layer, stack_layers
 from expds.features.ground import filter_ground
 from expds.features.relief import build_relief_layers
@@ -341,6 +341,35 @@ def build_site(
             source=str(las_files[0]),
         )
         dtm_layer = dtm_result.dtm
+
+    # 4b. Узкие пропуски заполняем ДО производных: slope/hillshade/TPI должны
+    # считаться по непрерывной поверхности, иначе dtm заполнен, а производные
+    # в тех же пикселях равны 0 (= медиана после нормировки) при valid=True.
+    with prof.stage("заполнение узких пропусков"):
+        filled_data, filled_mask = fill_narrow_gaps(
+            values=dtm_layer.data,
+            nodata=dtm_layer.nodata,
+            grid=grid,
+            max_dist_px=cfg.dtm.fill_max_dist_px,
+        )
+        still_nodata = ~np.isfinite(filled_data) | (filled_data == dtm_layer.nodata)
+        logger.info(
+            "Узкие пропуски: заполнено %d ячеек (%.2f%%), оставлено nodata %d (%.2f%%)",
+            int(filled_mask.sum()),
+            100.0 * float(filled_mask.mean()),
+            int(still_nodata.sum()),
+            100.0 * float(still_nodata.mean()),
+        )
+        if filled_mask.any():
+            dtm_layer = Layer(
+                name=dtm_layer.name,
+                data=filled_data,
+                grid=dtm_layer.grid,
+                nodata=dtm_layer.nodata,
+                source=dtm_layer.source,
+                license=dtm_layer.license,
+                unit=dtm_layer.unit,
+            )
 
     # 5. Производные рельефа.
     with prof.stage("производные рельефа"):

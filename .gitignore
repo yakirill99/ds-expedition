@@ -43,6 +43,11 @@ Thumbs.db
 runs/
 dist/
 
+# Артефакты отладки: бэкапы, одноразовые конфиги экспериментов
+*.bak_*
+.diagnostic-fix-backups/
+configs/overfit_*.yaml
+
 # Django
 .env
 web/db.sqlite3
