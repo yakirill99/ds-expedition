@@ -24,12 +24,27 @@ _DEFAULT_INPUT = Path("/data/input")
 _DEFAULT_OUTPUT = Path("/data/output/result.geojson")
 
 
+def _pkg_dir(module: object) -> Path:
+    """Каталог пакета.
+
+    expds собран без __init__.py — это namespace-пакет: у него
+    module.__file__ is None, а путь лежит в module.__path__.
+    """
+    f = getattr(module, "__file__", None)
+    if f:
+        return Path(f).resolve().parent
+    paths = list(getattr(module, "__path__", []) or [])
+    if not paths:
+        raise ImportError(f"{module!r}: нет ни __file__, ни __path__")
+    return Path(paths[0]).resolve()
+
+
 def _ensure_expds() -> Path:
     """Кладёт каталог с пакетом expds в sys.path. Возвращает путь к пакету."""
     try:
         import expds
 
-        return Path(expds.__file__).resolve().parent
+        return _pkg_dir(expds)
     except ImportError:
         pass
     for cand in (_HERE, _HERE.parent / "src", _APP):
@@ -37,8 +52,8 @@ def _ensure_expds() -> Path:
             sys.path.insert(0, str(cand))
             import expds
 
-            return Path(expds.__file__).resolve().parent
-    raise ImportError(f"пакет expds не найден (искали в {_HERE}, {_HERE.parent / 'src'}, {_APP})")
+            return _pkg_dir(expds)
+    raise ImportError(f"пакет expds не найден (искали в {_HERE}, {_APP})")
 
 
 def _asset(name: str, pkg_dir: Path) -> Path:
