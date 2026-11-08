@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ _OUT_SCORE_KEY = "confidence"
 _MARKUP_TYPE = "li"  # данные получены из лидарных облаков и их растров
 
 
-def _out_properties(det: Any, region: str) -> dict[str, Any]:
+def _out_properties(det: Any, region: str, orig_crs: str) -> dict[str, Any]:
     """Свойства фичи для сабмита.
 
     class_name/confidence — контракт регламента (Приложение 1).
@@ -57,6 +58,9 @@ def _out_properties(det: Any, region: str) -> dict[str, Any]:
         "score": float(det.score),
         "region_name": region,
         "markup_type": _MARKUP_TYPE,
+        # Справочное поле регламента: зона исходных данных. В примере выхода
+        # организаторов встречается 6 разных зон (32633..32644) в одном файле.
+        "original_crs": f"urn:ogc:def:crs:EPSG::{orig_crs.split(':')[-1]}",
     }
 
 
@@ -89,6 +93,36 @@ def _load_role1_if_present(config: Path) -> AppConfig | None:
     except (KeyError, TypeError, ValueError) as exc:
         logger.warning("В конфиге нет секций роли 1 (%s) — автосборка слоёв отключена", exc)
         return None
+
+
+# Регламент (стр. 59): файл отклоняется при >20000 объектов или >100 МБ.
+_MAX_FEATURES = 20_000
+_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _trim_to_limit(out: Path) -> None:
+    """Обрезает файл до лимитов регламента по confidence, если превышены."""
+    fc = json.loads(out.read_text(encoding="utf-8"))
+    feats = fc.get("features", [])
+    trimmed = False
+    if len(feats) > _MAX_FEATURES:
+        feats.sort(key=lambda f: float(f["properties"].get("confidence") or 0.0), reverse=True)
+        dropped = len(feats) - _MAX_FEATURES
+        feats = feats[:_MAX_FEATURES]
+        logger.warning("Обрезано до %d объектов (-%d, по confidence)", _MAX_FEATURES, dropped)
+        trimmed = True
+    fc["features"] = feats
+    text = json.dumps(fc, ensure_ascii=False)
+    while len(text.encode("utf-8")) > _MAX_BYTES and feats:
+        # Крупные полигоны весят больше всего: режем самые многословные.
+        feats.sort(key=lambda f: len(json.dumps(f["geometry"])), reverse=True)
+        feats = feats[: int(len(feats) * 0.9)]
+        fc["features"] = feats
+        text = json.dumps(fc, ensure_ascii=False)
+        logger.warning("Файл >100 МБ, обрезано до %d объектов", len(feats))
+        trimmed = True
+    if trimmed:
+        out.write_text(text, encoding="utf-8")
 
 
 def merge_geojson(parts: Sequence[Path], out: Path) -> None:
@@ -191,12 +225,15 @@ def run(
                     cfg.data.labels_crs,
                     class_key=_OUT_CLASS_KEY,
                     score_key=_OUT_SCORE_KEY,
-                    extra_properties=lambda d, _r=name: _out_properties(d, _r),
+                    extra_properties=partial(_out_properties, region=name, orig_crs=site.grid.crs),
                 )
             parts.append(part)
             n_det += len(dets)
         if len(sites) > 1:
             merge_geojson(parts, out)
+        # Лимиты регламента (20000 объектов / 100 МБ) — на файл, не на участок.
+        # Проверяем всегда, в т.ч. при одном участке.
+        _trim_to_limit(out)
     prof.report()  # печатает таблицу сам
     return {
         "out": str(out),

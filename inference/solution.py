@@ -50,7 +50,12 @@ def _mirror(src: Path, dst: Path) -> None:
             try:
                 os.link(entry, target)
             except OSError:
-                shutil.copyfile(entry, target)
+                # /data/input и /data/output — разные тома, os.link даёт EXDEV.
+                # Симлинк дешевле копирования, а LAS только читается.
+                try:
+                    os.symlink(entry, target)
+                except OSError:
+                    shutil.copyfile(entry, target)
 
 
 def _writable_copy(input_dir: Path, dest: Path) -> Path:

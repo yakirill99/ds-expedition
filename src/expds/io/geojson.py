@@ -37,6 +37,7 @@ _SOURCE_KEY = "source"
 _DEFAULT_CLASS_KEY = "class"
 _SCORE_KEY = "score"
 _AREA_EPS = 1e-12
+_COORD_NDIGITS = 9  # 9 знаков в метрах Меркатора ≈ 1 нм; лимит регламента — 15
 
 
 # ------------------------------------------------------------
@@ -331,7 +332,13 @@ def write_detections(
             rings = [_transform(transformer, r) for r in (det.geometry, *det.holes)]
             geometry = {
                 "type": GEOM_POLYGON,
-                "coordinates": polygon_rings_to_coords(rings),
+                "coordinates": [
+                    [
+                        [round(float(c[0]), _COORD_NDIGITS), round(float(c[1]), _COORD_NDIGITS)]
+                        for c in ring
+                    ]
+                    for ring in polygon_rings_to_coords(rings)
+                ],
             }
         features.append(
             {
