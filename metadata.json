@@ -1,4 +1,4 @@
 {
-  "image": "docker.io/yakirill99/ds-expedition:latest",
-  "entry_point": "python solution.py /data/input /data/output/result.geojson"
+  "image": "yakirill99/ds-expedition:latest",
+  "entry_point": "python solution.py"
 }
