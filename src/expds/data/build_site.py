@@ -27,7 +27,7 @@ import json
 import logging
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -261,6 +261,60 @@ def _unsupported_message(raw_dir: Path, kind: str) -> str:
     )
 
 
+def _read_utm_json(site: Path) -> str | None:
+    """CRS территории из UTM.json рядом с сырьём.
+
+    Регламент не фиксирует, где лежит привязка. В датасете она в UTM.json:
+        {"utm": "36N", "crs": "urn:ogc:def:crs:EPSG::32636"}
+    Часть площадок UTM.json не имеет — тогда CRS берётся из VLR LAS
+    (см. expds.data.las) или из конфига.
+
+    Returns:
+        Строка CRS ('EPSG:32636') или None, если файла нет / он битый.
+    """
+    path = Path(site) / "UTM.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("%s: UTM.json не читается (%s)", site, exc)
+        return None
+    crs = data.get("crs") or data.get("CRS")
+    if crs:
+        # urn:ogc:def:crs:EPSG::32636 -> EPSG:32636
+        text = str(crs)
+        if text.startswith("urn:ogc:def:crs:EPSG::"):
+            return "EPSG:" + text.rsplit(":", 1)[-1]
+        return text
+    utm = data.get("utm") or data.get("UTM")
+    if utm:
+        zone = int("".join(ch for ch in str(utm) if ch.isdigit()))
+        return f"EPSG:{32600 + zone}"
+    return None
+
+
+def _cfg_for_site(cfg: AppConfig, site: Path) -> AppConfig:
+    """Конфиг с CRS территории: source и internal = CRS из UTM.json.
+
+    Без этого все участки читаются в одном CRS из конфига, а он у каждого
+    региона свой (006 -> 32637, 013 -> 25833, Гнёздово -> 32636). Разница
+    в 4 зоны = сотни километров по X, детекции уезжают за пределы участка.
+
+    source == internal, чтобы не тратить время на перепроецирование:
+    сетка и все слои строятся в CRS территории, в EPSG:3857 их переводит
+    write_detections на выходе.
+    """
+    site_crs = _read_utm_json(site)
+    if not site_crs:
+        return cfg
+    if site_crs != cfg.crs.source:
+        logger.info(
+            "%s: CRS территории %s (в конфиге %s)", Path(site).name, site_crs, cfg.crs.source
+        )
+    return replace(cfg, crs=replace(cfg.crs, source=site_crs, internal=site_crs))
+
+
 def build_site(
     raw_dir: Path,
     out_dir: Path,
@@ -288,6 +342,9 @@ def build_site(
     raw_dir = Path(raw_dir)
     out_dir = Path(out_dir)
     prof = profiler if profiler is not None else Profiler()
+
+    # CRS территории: UTM.json рядом с сырьём переопределяет cfg.crs.
+    cfg = _cfg_for_site(cfg, raw_dir)
 
     layers_dir = out_dir / _LAYERS_DIR
     layers_ready = layers_dir.is_dir() and next(layers_dir.glob("*.tif"), None) is not None

@@ -34,7 +34,30 @@ from expds.utils.profiler import Profiler
 logger = logging.getLogger(__name__)
 
 _LAYERS_DIR = "layers"
-_NO_LABELS = "__inference_no_labels__.geojson"  # на инференсе разметку не читаем
+_NO_LABELS = "__inference_no_labels__.geojson"
+
+# Контракт выхода (Приложение 1 регламента): class_name обязателен, объекты
+# с иным значением платформа пропускает. confidence — необязательное поле,
+# влияет на порядок жадного матчинга; без него подставляется 1.0.
+_OUT_CLASS_KEY = "class_name"
+_OUT_SCORE_KEY = "confidence"
+_MARKUP_TYPE = "li"  # данные получены из лидарных облаков и их растров
+
+
+def _out_properties(det: Any, region: str) -> dict[str, Any]:
+    """Свойства фичи для сабмита.
+
+    class_name/confidence — контракт регламента (Приложение 1).
+    class/score — дубли для локальной метрики: tests/test_end2end_synthetic
+    и expds.eval читают 'class' по умолчанию. Регламент лишние свойства
+    не запрещает, поэтому пишем оба набора с одинаковыми значениями.
+    """
+    return {
+        "class": det.cls,
+        "score": float(det.score),
+        "region_name": region,
+        "markup_type": _MARKUP_TYPE,
+    }
 
 
 def find_sites(data: Path) -> list[Path]:
@@ -161,7 +184,15 @@ def run(
             del probs
             with prof.stage(f"{name}: запись"):
                 part = out if len(sites) == 1 else Path(tmp) / f"part_{i}.geojson"
-                write_detections(part, dets, site.grid.crs, cfg.data.labels_crs)
+                write_detections(
+                    part,
+                    dets,
+                    site.grid.crs,
+                    cfg.data.labels_crs,
+                    class_key=_OUT_CLASS_KEY,
+                    score_key=_OUT_SCORE_KEY,
+                    extra_properties=lambda d, _r=name: _out_properties(d, _r),
+                )
             parts.append(part)
             n_det += len(dets)
         if len(sites) > 1:

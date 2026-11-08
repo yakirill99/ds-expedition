@@ -301,6 +301,8 @@ def write_detections(
     src_crs: str,
     dst_crs: str,
     class_key: str = _DEFAULT_CLASS_KEY,
+    score_key: str = _SCORE_KEY,
+    extra_properties: Any = None,
 ) -> int:
     """Пишет детекции в GeoJSON в dst_crs.
 
@@ -309,7 +311,12 @@ def write_detections(
         detections: детекции в src_crs (crs.internal).
         src_crs: CRS координат детекций.
         dst_crs: CRS выхода (crs.output, EPSG:3857).
-        class_key: имя свойства с классом.
+        class_key: имя свойства с классом. Для сабмита — "class_name"
+            (Технический регламент КОЗ №3, Приложение 1, требование к выходу).
+        score_key: имя свойства с уверенностью. Для сабмита — "confidence".
+        extra_properties: dict или вызываемый (Detection) -> dict. Дозаписывается
+            в properties поверх class_key/score_key. Нужен, чтобы дублировать
+            class/score для локальной метрики при class_name/confidence для сабмита.
 
     Returns:
         Число записанных объектов.
@@ -331,8 +338,13 @@ def write_detections(
                 "type": "Feature",
                 "properties": {
                     class_key: det.cls,
-                    _SCORE_KEY: float(det.score),
+                    score_key: float(det.score),
                     _SOURCE_KEY: det.source,
+                    **(
+                        extra_properties(det)
+                        if callable(extra_properties)
+                        else (extra_properties or {})
+                    ),
                 },
                 "geometry": geometry,
             }
