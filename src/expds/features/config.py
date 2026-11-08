@@ -100,6 +100,28 @@ class AppConfig:
 
 
 @dataclass(frozen=True)
+class SpectralConfig:
+    """Параметры спектральных индексов (NDVI, SR, ARI, GNDVI, NDWI, SAVI).
+
+    Индексы каналов — 0-based, как в rasterio (band 1 -> index 0).
+    Если nir_channel is None — NDVI/SR/SAVI не строятся (нет NIR).
+    Если red_channel is None — ARI не строится.
+
+    channel_std_min — минимальное std канала (по валидным пикселям), чтобы
+    признать его информативным. Константные каналы (alpha-маска, nodata-заливка)
+    в индексы не идут: NDVI/ARI на них — мусор.
+    """
+
+    enabled: tuple[str, ...]
+    red_channel: int | None
+    nir_channel: int | None
+    green_channel: int | None
+    blue_channel: int | None
+    nodata: float
+    channel_std_min: float = 0.01
+
+
+@dataclass(frozen=True)
 class AlignConfig:
     """Параметры выравнивания слоёв.
 
