@@ -97,6 +97,31 @@ def main() -> int:
     if missing:
         print(f"  занулены ({len(missing)}): {', '.join(missing)}")
 
+    cloud_names = {
+        "point_density",
+        "mean_intensity",
+        "std_intensity",
+        "non_first_return_ratio",
+        "mean_return_number",
+        "mean_z",
+        "z_std",
+    }
+    cloud_present = [n for n in site.channel_names if n in cloud_names]
+    if cloud_present:
+        print(
+            f"  cloud-каналы ({len(cloud_present)}): {', '.join(cloud_present)}; "
+            "если layers/ собраны до фикса _bin_indices — пересобрать (build_layers --force)"
+        )
+
+    geo_present = [n for n in site.channel_names if n.startswith(("gpr_slice_", "mag_"))]
+    if not geo_present:
+        print(
+            "  геофизика: gpr_slice_*/mag_* отсутствуют; "
+            "07_*.tif нет в датасете — finds_points/object_poly на рельефе, gorodishcha на рельефе"
+        )
+    else:
+        print(f"  геофизика ({len(geo_present)}): {', '.join(geo_present)}")
+
     n_valid = int(site.valid.sum())
     pct = 100.0 * n_valid / site.valid.size
     print(f"Валидные пиксели: {n_valid}/{site.valid.size} ({pct:.1f}%)")

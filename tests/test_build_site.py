@@ -349,3 +349,107 @@ def test_resolve_sites_geo_only_region_is_skipped(tmp_path: Path, app_cfg) -> No
     (site / "07_x_MagGr" / "MagGr.xyz").write_text("0 0 0\n", encoding="utf-8")
 
     assert resolve_sites(site, app_cfg, Profiler()) == []
+
+
+def test_order_channel_names_groups_match_contract() -> None:
+    """Порядок групп: dtm -> рельеф -> cloud -> rgb -> gpr/mag.
+
+    Порядок в sample_meta.json (build_site) должен совпадать с порядком
+    channels в configs/dataset_real.yaml, иначе load_site и build_site
+    дают разные DataSpec на одном и том же участке.
+    """
+    from expds.data.build_site import _order_channel_names
+
+    names = [
+        "mag_tmi",
+        "gpr_slice_1_5",
+        "rgb_r",
+        "rgb_g",
+        "rgb_b",
+        "z_std",
+        "point_density",
+        "hillshade_az_45",
+        "slrm_sigma_8.0",
+        "dtm",
+    ]
+    ordered = _order_channel_names(names)
+    assert ordered == [
+        "dtm",
+        "hillshade_az_45",
+        "slrm_sigma_8.0",
+        "point_density",
+        "z_std",
+        "rgb_b",
+        "rgb_g",
+        "rgb_r",
+        "gpr_slice_1_5",
+        "mag_tmi",
+    ]
+
+
+def test_sample_meta_order_matches_load_site_spec(tmp_path: Path) -> None:
+    """sample_meta.json после build_site читается load_site в том же порядке.
+
+    Регрессия на рассинхрон: если _order_channel_names поставит gpr_/mag_
+    раньше rgb_, meta зафиксирует один порядок, а DataSpec из конфига — другой.
+    """
+    from expds.data.build_site import build_site
+    from expds.features.grid import Grid
+    from expds.tiles.dataset import load_site
+
+    site = tmp_path / "site_order"
+    site.mkdir()
+    _write_las(site / "site.las", n_veg=10)
+
+    # Магнитный канал пишем вручную, чтобы не тянуть MagGr-генератор.
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    grid_path = site / "layers" / "dtm.tif"
+    site_layers = site / "layers"
+    site_layers.mkdir(exist_ok=True)
+
+    # После build_site сетка известна из dtm.tif; mag_* собираем поверх неё.
+    app_cfg_path = tmp_path / "cfg.yaml"
+    app_cfg_path.write_text(_TEST_YAML, encoding="utf-8")
+    app_cfg = load_config(app_cfg_path)
+    build_site(site, site, app_cfg, Profiler())
+
+    with rasterio.open(grid_path) as src:
+        grid = Grid(
+            crs=str(src.crs),
+            pixel_size=float(abs(src.res[0])),
+            x_min=float(src.bounds.left),
+            y_min=float(src.bounds.bottom),
+            width=int(src.width),
+            height=int(src.height),
+        )
+    (site / "07_mag").mkdir()
+    with rasterio.open(
+        site / "07_mag" / "mag_tmi.tif",
+        "w",
+        driver="GTiff",
+        width=grid.width,
+        height=grid.height,
+        count=1,
+        dtype="float32",
+        crs=grid.crs,
+        transform=from_origin(grid.x_min, grid.y_min + grid.height, 1.0, 1.0),
+    ) as dst:
+        dst.write(np.full((grid.height, grid.width), 1.0, np.float32), 1)
+
+    from expds.data.build_mag import build_mag_layers
+
+    build_mag_layers(site)
+
+    meta = json.loads((site / "samples" / "sample_meta.json").read_text(encoding="utf-8"))
+    site_data = load_site(
+        site,
+        channels=tuple(meta["channel_names"]),
+        classes=("mound", "rampart", "ditch"),
+        heatmap_sigma_px=2.0,
+        labels_crs="EPSG:3857",
+        labels_file="__none__.geojson",
+    )
+    assert list(site_data.channel_names) == meta["channel_names"]

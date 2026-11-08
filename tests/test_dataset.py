@@ -181,7 +181,6 @@ def test_class_validity_masks_unobservable(tmp_path: Path) -> None:
     assert v.tolist() == [1.0, 1.0, 0.0]
 
 
-# Проверки заполнения nodata без выдуманных доноров.
 def test_regression_fill_nodata_without_donors():
     """Полностью отсутствующее покрытие не превращается в наблюдаемые данные."""
     from expds.features.grid import Layer
@@ -195,3 +194,30 @@ def test_regression_fill_nodata_without_donors():
         result = _fill_nodata(layer, 3.0)
         assert not result.valid_mask.any()
         np.testing.assert_array_equal(result.data, layer.data)
+
+
+def test_class_validity_gorodishcha_observable_with_lidar(tmp_path: Path) -> None:
+    """Городища видны в рельефе: при 01_/02_ без 07_ класс остаётся наблюдаемым."""
+    (tmp_path / "01_site_La_точки").mkdir()
+    classes = ["kurgany_tselye", "gorodishcha", "finds_points"]
+
+    v = class_validity(tmp_path, classes)
+    assert v.tolist() == [1.0, 1.0, 0.0]
+
+
+def test_class_validity_gorodishcha_observable_with_mag(tmp_path: Path) -> None:
+    """Без лидара, но с магнитометрией — городища всё ещё наблюдаемы."""
+    (tmp_path / "07_site_MagGr").mkdir()
+    classes = ["gorodishcha", "finds_points", "object_poly"]
+
+    v = class_validity(tmp_path, classes)
+    assert v.tolist() == [1.0, 1.0, 1.0]
+
+
+def test_class_validity_gorodishcha_not_observable_without_sources(tmp_path: Path) -> None:
+    """Ни лидара, ни магнитометрии — класс выпадает из лосса."""
+    (tmp_path / "03_site_Ae_аэро").mkdir()
+    classes = ["gorodishcha"]
+
+    v = class_validity(tmp_path, classes)
+    assert v.tolist() == [0.0]

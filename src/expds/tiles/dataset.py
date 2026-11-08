@@ -151,10 +151,13 @@ def normalize_rgb_group(layers: Sequence[Layer]) -> list[Layer]:
 
 # Класс -> префиксы папок-источников, без которых он не наблюдаем.
 # Нет записи — класс виден в рельефе, наблюдаем всегда.
-# ПРЕФИКСЫ ПРОВЕРИТЬ по факту: ls -d data/raw/200_Судьбищи_2/0*/
+# Магнитометрия (07_) даёт finds_points и object_poly; городища видны
+# и в рельефе (LiDAR), и в магнитометрии — им нужен хотя бы один источник,
+# поэтому gorodishcha привязан к объединению 01_/02_/07_.
 _CLASS_SOURCE_PREFIXES: dict[str, tuple[str, ...]] = {
     "finds_points": ("07_",),
     "object_poly": ("07_",),
+    "gorodishcha": ("01_", "02_", "07_"),
     "arkhitektury": ("03_", "04_"),
 }
 

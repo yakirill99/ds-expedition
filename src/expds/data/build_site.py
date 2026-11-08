@@ -32,6 +32,8 @@ from pathlib import Path
 
 import numpy as np
 
+from expds.data.build_gpr import build_gpr_layers
+from expds.data.build_mag import build_mag_layers
 from expds.data.build_raster import RGB_PREFIXES, build_site_rasters
 from expds.data.las import read_points
 from expds.data.raster import write_raster
@@ -50,7 +52,12 @@ _SAMPLES_DIR = "samples"
 _LAS_SUFFIXES = {".las", ".laz"}
 
 # Фиксированный порядок каналов для Sample: сначала dtm, потом рельеф,
-# потом cloud. Внутри каждой группы — строковая сортировка (CONTRACTS.md §3).
+# потом cloud, потом оптика (rgb_*), потом геофизика (gpr_slice_*, mag_*).
+# Внутри каждой группы — строковая сортировка (CONTRACTS.md §3).
+# Порядок групп задан явно: алфавитная сортировка поставила бы gpr_*/mag_*
+# между cloud и rgb, а контракт каналов в configs/dataset_real.yaml
+# перечисляет rgb_* до геофизики. Расхождение здесь даёт разный порядок
+# в sample_meta.json (build_site) и в load_site (инференс).
 _CHANNEL_ORDER_DTM = "dtm"
 _CHANNEL_ORDER_RELIEF_PREFIXES = (
     "slope",
@@ -73,6 +80,8 @@ _CHANNEL_ORDER_CLOUD_PREFIXES = (
     "mean_z",
     "z_std",
 )
+_CHANNEL_ORDER_OPTIC_PREFIXES = ("rgb_",)
+_CHANNEL_ORDER_GEO_PREFIXES = ("gpr_slice_", "mag_")
 
 
 class RawSiteUnsupportedError(RuntimeError):
@@ -123,7 +132,12 @@ def site_kind(path: Path) -> str:
 
 
 def _order_channel_names(names: list[str]) -> list[str]:
-    """Упорядочивает каналы: dtm, рельеф, cloud; внутри группы по алфавиту."""
+    """Упорядочивает каналы: dtm, рельеф, cloud, оптика, геофизика.
+
+    Внутри группы — алфавитная сортировка. Порядок групп совпадает с
+    контрактом channels в configs/dataset_real.yaml, чтобы sample_meta.json
+    (build_site) и DataSpec (load_site) давали одинаковый порядок.
+    """
     ordered: list[str] = []
 
     if _CHANNEL_ORDER_DTM in names:
@@ -138,6 +152,12 @@ def _order_channel_names(names: list[str]) -> list[str]:
 
     cloud = sorted(n for n in names if any(n.startswith(p) for p in _CHANNEL_ORDER_CLOUD_PREFIXES))
     ordered.extend(cloud)
+
+    optic = sorted(n for n in names if any(n.startswith(p) for p in _CHANNEL_ORDER_OPTIC_PREFIXES))
+    ordered.extend(optic)
+
+    geo = sorted(n for n in names if any(n.startswith(p) for p in _CHANNEL_ORDER_GEO_PREFIXES))
+    ordered.extend(geo)
 
     remaining = sorted(set(names) - set(ordered))
     ordered.extend(remaining)
@@ -480,6 +500,36 @@ def _build_rgb(site: Path, labels_crs: str, max_pixels: int, prof: Profiler) -> 
         logger.warning("%s: rgb_* не собраны: %s", site.name, res.get("reason"))
 
 
+def _build_gpr(site: Path, prof: Profiler) -> None:
+    """gpr_slice_* из 07_/08_/09_, если они есть. Сетка — dtm.tif или meta.
+
+    Приоритет finds_points + object_poly (20 весов): GPR-слайсы дают
+    амплитудные аномалии на глубине, которых нет в рельефе и оптике.
+    """
+    with prof.stage(f"{site.name}: сборка gpr_slice_* (build_gpr_layers)"):
+        try:
+            built = build_gpr_layers(site)
+        except FileNotFoundError:
+            return
+    if built:
+        logger.info("%s: собрано GPR-каналов: %s", site.name, ", ".join(sorted(built)))
+
+
+def _build_mag(site: Path, prof: Profiler) -> None:
+    """mag_* из 07_, если они есть. Сетка — dtm.tif или meta.
+
+    Приоритет gorodishcha (15 весов): магнитные аномалии дают сигнал
+    по площадным объектам, которые слабо видны в рельефе.
+    """
+    with prof.stage(f"{site.name}: сборка mag_* (build_mag_layers)"):
+        try:
+            built = build_mag_layers(site)
+        except FileNotFoundError:
+            return
+    if built:
+        logger.info("%s: собрано магнитных каналов: %s", site.name, ", ".join(sorted(built)))
+
+
 def resolve_sites(
     data: Path,
     cfg: AppConfig | None,
@@ -570,6 +620,8 @@ def _resolve_one(
             build_site(site, site, cfg, prof)
 
     _build_rgb(site, labels_crs, max_pixels, prof)
+    _build_gpr(site, prof)
+    _build_mag(site, prof)
 
     if _has_layers(site):
         return [site]

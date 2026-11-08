@@ -98,6 +98,9 @@ def _bin_points(
     col_idx = col_idx[valid]
     row_idx = row_idx[valid]
     z_valid = z[valid]
+    # Привязка по границам: точка в первой половине ячейки попадает в неё же.
+    # transform_to_pixel + floor здесь давало сдвиг на -0.5 px и выбрасывало
+    # точки первой половины пикселя (на 100 точках в ячейке: 65 отброшено).
 
     count = np.zeros(grid.shape, dtype=np.int32)
     np.add.at(count, (row_idx, col_idx), 1)

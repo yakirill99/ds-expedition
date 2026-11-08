@@ -306,3 +306,54 @@ def test_regression_layer_mask_excludes_nan_and_inf():
     layer = Layer(name="test", data=a, grid=_regression_grid(), nodata=-9999)
     assert not layer.valid_mask[0].any()
     assert layer.valid_mask[1:].all()
+
+
+def test_regression_bin_indices_half_pixel_shift():
+    """100 точек в первой половине пикселя -> все попадают в ячейку (0, 0).
+
+    Баг: transform_to_pixel возвращает координату от центра ячейки
+    (col = (x - x_min)/ps - 0.5), floor от неё сдвигает на -0.5 px.
+    Для точки x = x_min + 0.1 (первая половина пикселя) это даёт col = -0.4,
+    floor = -1, и точка выпадает из сетки. На 100 точках в первой половине
+    пикселя попадало 35 из 100, отбрасывалось 65.
+    """
+    from expds.features.cloud_features import _bin_indices
+
+    grid = Grid(crs="EPSG:3857", pixel_size=1.0, x_min=0.0, y_min=0.0, width=4, height=4)
+    # Все точки в первой половине пикселя (0, 0): x, y в [0, 0.5).
+    xs = np.full(100, 0.1, dtype=np.float64)
+    ys = np.full(100, 0.1, dtype=np.float64)
+
+    row_idx, col_idx, valid = _bin_indices(xs, ys, grid)
+    assert int(valid.sum()) == 100, f"попало {int(valid.sum())} из 100"
+    assert (row_idx[valid] == 0).all()
+    assert (col_idx[valid] == 0).all()
+
+
+def test_regression_bin_indices_boundaries():
+    """Точки на границах: левая/нижняя включены, правая/верхняя исключены."""
+    from expds.features.cloud_features import _bin_indices
+
+    grid = Grid(crs="EPSG:3857", pixel_size=1.0, x_min=0.0, y_min=0.0, width=4, height=4)
+    xs = np.array([0.0, 0.5, 0.999, 4.0], dtype=np.float64)
+    ys = np.array([0.0, 0.5, 0.999, 4.0], dtype=np.float64)
+
+    _row, _col, valid = _bin_indices(xs, ys, grid)
+    assert valid.tolist() == [True, True, True, False]
+
+
+def test_regression_point_density_half_pixel():
+    """point_density на точках в первой половине пикселя не теряет их.
+
+    Раньше _bin_indices через transform_to_pixel + floor выбрасывал
+    точки в первой половине пикселя, и point_density в этой ячейке
+    была занижена (0.35 вместо 1.0 на 100 точках в одной ячейке).
+    """
+    from expds.features.cloud_features import compute_point_density
+
+    grid = Grid(crs="EPSG:3857", pixel_size=1.0, x_min=0.0, y_min=0.0, width=4, height=4)
+    xs = np.full(100, 0.1, dtype=np.float64)
+    ys = np.full(100, 0.1, dtype=np.float64)
+
+    layer = compute_point_density(x=xs, y=ys, grid=grid)
+    assert float(layer.data[0, 0]) == pytest.approx(100.0)

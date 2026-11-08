@@ -171,12 +171,7 @@ def _build_min_surface(
     Returns:
         np.ndarray float32 формы grid.shape с минимальными Z.
     """
-    col, row = grid.transform_to_pixel(x=x, y=y)
-    col_idx = np.floor(col).astype(np.int64)
-    row_idx = np.floor(row).astype(np.int64)
-
-    # Отбрасываем точки вне сетки (численные погрешности).
-    valid = (col_idx >= 0) & (col_idx < grid.width) & (row_idx >= 0) & (row_idx < grid.height)
+    col_idx, row_idx, valid = grid.world_to_cell(x=x, y=y)
     col_idx = col_idx[valid]
     row_idx = row_idx[valid]
     z_valid = z[valid]
@@ -266,9 +261,12 @@ def _classify_points(
     Returns:
         Булев массив формы (N,) — True для земли.
     """
-    col, row = grid.transform_to_pixel(x=x, y=y)
-    col_idx = np.clip(np.floor(col).astype(np.int64), 0, grid.width - 1)
-    row_idx = np.clip(np.floor(row).astype(np.int64), 0, grid.height - 1)
+    col_idx, row_idx, valid = grid.world_to_cell(x=x, y=y)
+    # Точки вне сетки: клипуем в край, чтобы не уронить индексацию. На практике
+    # их не должно быть (сетка строится по bbox точек), но на границах
+    # численные погрешности дают valid=False.
+    col_idx = np.clip(np.where(valid, col_idx, 0), 0, grid.width - 1)
+    row_idx = np.clip(np.where(valid, row_idx, 0), 0, grid.height - 1)
 
     surface_at_point = surface[row_idx, col_idx]
     slope_at_point = slope[row_idx, col_idx]
@@ -276,7 +274,7 @@ def _classify_points(
     height_ok = (z - surface_at_point) <= height_threshold
     slope_ok = slope_at_point <= slope_threshold
 
-    return height_ok & slope_ok
+    return height_ok & slope_ok & valid
 
 
 def _refine_surface(
@@ -309,9 +307,9 @@ def _refine_surface(
     y_g = y[ground_mask]
     z_g = z[ground_mask]
 
-    col, row = grid.transform_to_pixel(x=x_g, y=y_g)
-    col_idx = np.clip(np.floor(col).astype(np.int64), 0, grid.width - 1)
-    row_idx = np.clip(np.floor(row).astype(np.int64), 0, grid.height - 1)
+    col_idx, row_idx, valid = grid.world_to_cell(x=x_g, y=y_g)
+    col_idx = np.clip(np.where(valid, col_idx, 0), 0, grid.width - 1)
+    row_idx = np.clip(np.where(valid, row_idx, 0), 0, grid.height - 1)
 
     surface = np.full(grid.shape, np.inf, dtype=np.float64)
     np.minimum.at(surface, (row_idx, col_idx), z_g)
