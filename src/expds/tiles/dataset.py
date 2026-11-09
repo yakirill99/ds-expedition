@@ -151,14 +151,25 @@ def normalize_rgb_group(layers: Sequence[Layer]) -> list[Layer]:
 
 # Класс -> префиксы папок-источников, без которых он не наблюдаем.
 # Нет записи — класс виден в рельефе, наблюдаем всегда.
-# Магнитометрия (07_) даёт finds_points и object_poly; городища видны
-# и в рельефе (LiDAR), и в магнитометрии — им нужен хотя бы один источник,
-# поэтому gorodishcha привязан к объединению 01_/02_/07_.
+# gorodishcha сюда не добавлять: он виден в LiDAR, а class_validity смотрит
+# подпапки участка в sites_dir. Если папок 01_/02_ там нет, класс выпадает
+# из лосса на всех участках.
 _CLASS_SOURCE_PREFIXES: dict[str, tuple[str, ...]] = {
     "finds_points": ("07_",),
     "object_poly": ("07_",),
-    "gorodishcha": ("01_", "02_", "07_"),
     "arkhitektury": ("03_", "04_"),
+}
+
+
+# Папка-источник в raw -> каналы, которые из неё собираются в layers/.
+# В data/rebuilt подпапок-источников нет, есть только layers/ и samples/,
+# поэтому источник определяем и по собранным каналам.
+_SOURCE_LAYER_PREFIXES: dict[str, tuple[str, ...]] = {
+    "07_": ("mag_",),
+    "08_": ("gpr_slice_",),
+    "09_": ("gpr_slice_",),
+    "03_": ("rgb_",),
+    "04_": ("rgb_",),
 }
 
 
@@ -169,8 +180,17 @@ def class_validity(site_dir: Path, classes: Sequence[str]) -> np.ndarray:
     классу обнуляется. Иначе на лидарных участках без геофизики голова
     finds_points учится «находок нет нигде» и глушит 200_Судьбищи_2,
     где они размечены.
+
+    Источник считается найденным, если есть подпапка-источник (raw) или
+    собранный из неё канал в layers/ (data/rebuilt).
     """
     dirs = {p.name[:3] for p in site_dir.iterdir() if p.is_dir()}
+    layers_dir = site_dir / _LAYERS_DIR
+    if layers_dir.is_dir():
+        stems = [p.stem for p in layers_dir.glob("*.tif")]
+        for src, prefixes in _SOURCE_LAYER_PREFIXES.items():
+            if any(s.startswith(prefixes) for s in stems):
+                dirs.add(src)
     out = np.ones(len(classes), dtype=np.float32)
     for k, name in enumerate(classes):
         need = _CLASS_SOURCE_PREFIXES.get(name)

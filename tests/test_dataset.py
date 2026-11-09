@@ -214,10 +214,17 @@ def test_class_validity_gorodishcha_observable_with_mag(tmp_path: Path) -> None:
     assert v.tolist() == [1.0, 1.0, 1.0]
 
 
-def test_class_validity_gorodishcha_not_observable_without_sources(tmp_path: Path) -> None:
-    """Ни лидара, ни магнитометрии — класс выпадает из лосса."""
-    (tmp_path / "03_site_Ae_аэро").mkdir()
-    classes = ["gorodishcha"]
+def test_regression_class_validity_gorodishcha_without_source_dirs(tmp_path: Path) -> None:
+    """Участок в data/rebuilt без папок-источников: gorodishcha остаётся в лоссе."""
+    (tmp_path / "layers").mkdir()
+    (tmp_path / "samples").mkdir()
+    v = class_validity(tmp_path, ["kurgany_tselye", "gorodishcha", "finds_points"])
+    assert v.tolist() == [1.0, 1.0, 0.0]
 
-    v = class_validity(tmp_path, classes)
-    assert v.tolist() == [0.0]
+
+def test_regression_class_validity_from_built_layers(tmp_path: Path) -> None:
+    """В data/rebuilt нет папки 07_, но есть layers/mag_*.tif: находки наблюдаемы."""
+    (tmp_path / "layers").mkdir()
+    (tmp_path / "layers" / "mag_tmi.tif").write_bytes(b"")
+    classes = ["kurgany_tselye", "finds_points", "object_poly", "arkhitektury"]
+    assert class_validity(tmp_path, classes).tolist() == [1.0, 1.0, 1.0, 0.0]

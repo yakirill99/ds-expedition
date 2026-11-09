@@ -42,12 +42,22 @@ META_PATH = Path("samples") / "sample_meta.json"
 DEFAULT_FIELD = "tmi"
 
 
+# Цветная карта — раскраска по палитре: значение канала не монотонно по полю,
+# модели такой канал вреден. Берём только серые и одноканальные растры.
+_MAG_SKIP_TOKENS = ("цвет", "color", "colour", "rgb")
+
+
 def _mag_sources(site_dir: Path) -> list[Path]:
-    """Все магнитные растры участка (07_* с .tif)."""
+    """Магнитные растры участка (07_*.tif) без цветных карт."""
     tifs: list[Path] = []
     for sub in sorted(Path(site_dir).iterdir()):
-        if sub.is_dir() and sub.name[:3] in MAG_PREFIXES:
-            tifs.extend(sorted(sub.glob("*.tif")))
+        if not (sub.is_dir() and sub.name[:3] in MAG_PREFIXES):
+            continue
+        for p in sorted(sub.glob("*.tif")):
+            if any(t in p.stem.lower() for t in _MAG_SKIP_TOKENS):
+                logger.info("%s: цветная карта, пропускаем", p.name)
+                continue
+            tifs.append(p)
     return tifs
 
 

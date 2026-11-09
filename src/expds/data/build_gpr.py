@@ -31,7 +31,9 @@ from expds.features.grid import Grid, Layer
 
 logger = logging.getLogger(__name__)
 
-GPR_PREFIXES = ("07_", "08_", "09_")  # MagGr / EtGr / TerFl; GPR-слайсы могут быть в любом
+# 07_ — магнитометрия (MagGr), её читает build_mag. Здесь её брать нельзя:
+# _depth_from_name принимает "01_..._MagGr_серый.tif" за срез на глубине 1 м.
+GPR_PREFIXES = ("08_", "09_")
 GPR_CHANNEL_PREFIX = "gpr_slice_"
 PIXEL_SIZE = 1.0
 NODATA = -9999.0
@@ -44,12 +46,21 @@ META_PATH = Path("samples") / "sample_meta.json"
 DEFAULT_DEPTHS_M = (0.5, 1.0, 1.5, 2.0)
 
 
+# Профили EtGr — вертикальные разрезы вдоль линии, а не план на глубине.
+# Положить их на горизонтальную сетку участка нельзя.
+_GPR_SKIP_TOKENS = ("профиль", "profile")
+
+
 def _gpr_sources(site_dir: Path) -> list[Path]:
-    """Все GPR-растры участка (07_/08_/09_ с .tif)."""
+    """Растры-срезы участка (08_/09_ с .tif), без вертикальных профилей."""
     tifs: list[Path] = []
     for sub in sorted(Path(site_dir).iterdir()):
-        if sub.is_dir() and sub.name[:3] in GPR_PREFIXES:
-            tifs.extend(sorted(sub.glob("*.tif")))
+        if not (sub.is_dir() and sub.name[:3] in GPR_PREFIXES):
+            continue
+        for p in sorted(sub.glob("*.tif")):
+            if any(t in p.stem.lower() for t in _GPR_SKIP_TOKENS):
+                continue
+            tifs.append(p)
     return tifs
 
 
@@ -94,18 +105,27 @@ def _grid_from_gpr(site_dir: Path) -> Grid:
 
 
 def _depth_from_name(path: Path) -> float | None:
-    """Глубина из имени файла: gpr_1.5m.tif / slice_150cm.tif -> метры."""
-    stem = path.stem.lower()
-    for token in stem.replace("-", "_").split("_"):
+    """Глубина из имени: ..._карта_03_1.0.tif -> 1.0, gpr_1.5m -> 1.5, slice_150cm -> 1.5.
+
+    Глубиной считается только токен с явной глубиной: дробь (0.2) или
+    суффикс m/cm. Голое целое ("01") — порядковый номер файла.
+    Ищем с конца: глубина в именах стоит последней.
+    """
+    stem = path.stem.lower().replace("-", "_")
+    for token in reversed(stem.split("_")):
         token = token.strip()
+        if token.endswith("cm"):
+            scale, num = 0.01, token[:-2]
+        elif token.endswith("m"):
+            scale, num = 1.0, token[:-1]
+        elif "." in token:
+            scale, num = 1.0, token
+        else:
+            continue
         try:
-            value = float(token.rstrip("m"))
+            return float(num) * scale
         except ValueError:
             continue
-        if "cm" in token:
-            return value / 100.0
-        if value < 10.0:  # 0.5, 1.0, 1.5, 2.0 — уже метры
-            return value
     return None
 
 

@@ -72,9 +72,9 @@ def test_build_gpr_names_from_depth(tmp_path: Path) -> None:
     meta.parent.mkdir(parents=True)
     meta.write_text(json.dumps({"grid": asdict(grid)}), encoding="utf-8")
 
-    (tmp_path / "07_gpr").mkdir()
-    _write_slice(tmp_path / "07_gpr" / "gpr_1.5m.tif", np.ones((8, 8), np.float32), grid)
-    _write_slice(tmp_path / "07_gpr" / "gpr_2m.tif", np.ones((8, 8), np.float32) * 2, grid)
+    (tmp_path / "08_gpr").mkdir()
+    _write_slice(tmp_path / "08_gpr" / "gpr_1.5m.tif", np.ones((8, 8), np.float32), grid)
+    _write_slice(tmp_path / "08_gpr" / "gpr_2m.tif", np.ones((8, 8), np.float32) * 2, grid)
 
     built = build_gpr_layers(tmp_path)
     assert set(built) == {"gpr_slice_1_5", "gpr_slice_2"}
@@ -87,8 +87,8 @@ def test_build_gpr_idempotent_and_force(tmp_path: Path) -> None:
     grid = _grid()
     (tmp_path / "layers").mkdir()
     (tmp_path / "layers" / "gpr_slice_0_5.tif").write_bytes(b"")
-    (tmp_path / "07_gpr").mkdir()
-    _write_slice(tmp_path / "07_gpr" / "gpr_0.5m.tif", np.ones((8, 8), np.float32), grid)
+    (tmp_path / "08_gpr").mkdir()
+    _write_slice(tmp_path / "08_gpr" / "gpr_0.5m.tif", np.ones((8, 8), np.float32), grid)
 
     assert build_gpr_layers(tmp_path) != {}  # уже есть — вернёт существующий
     before = (tmp_path / "layers" / "gpr_slice_0_5.tif").stat().st_size
@@ -103,8 +103,8 @@ def test_gpr_channels_reach_stack_layers(tmp_path: Path) -> None:
     meta = tmp_path / "samples" / "sample_meta.json"
     meta.parent.mkdir(parents=True)
     meta.write_text(json.dumps({"grid": asdict(grid)}), encoding="utf-8")
-    (tmp_path / "07_gpr").mkdir()
-    _write_slice(tmp_path / "07_gpr" / "gpr_1.5m.tif", np.full((8, 8), 5.0, np.float32), grid)
+    (tmp_path / "08_gpr").mkdir()
+    _write_slice(tmp_path / "08_gpr" / "gpr_1.5m.tif", np.full((8, 8), 5.0, np.float32), grid)
 
     build_gpr_layers(tmp_path)
 
@@ -118,3 +118,35 @@ def test_gpr_channels_reach_stack_layers(tmp_path: Path) -> None:
 def test_build_gpr_without_sources_is_empty(tmp_path: Path) -> None:
     """Нет 07_/08_/09_ — пустой словарь, без исключения."""
     assert build_gpr_layers(tmp_path) == {}
+
+
+def test_regression_gpr_ignores_mag_folder(tmp_path: Path) -> None:
+    """Карты магнитометрии из 07_ не становятся gpr_slice_*."""
+    from expds.data.build_gpr import _gpr_sources
+
+    mag = tmp_path / "07_site_MagGr_карты"
+    mag.mkdir()
+    (mag / "01_site_MagGr_серый.tif").write_bytes(b"")
+    assert _gpr_sources(tmp_path) == []
+
+
+def test_regression_depth_ignores_file_index() -> None:
+    """Номер файла "01" не глубина; глубина — дробь или суффикс m/cm."""
+    from expds.data.build_gpr import _depth_from_name
+
+    assert _depth_from_name(Path("01_site_EtGr_карта_01_0.2.tif")) == pytest.approx(0.2)
+    assert _depth_from_name(Path("03_site_EtGr_карта_03_1.0.tif")) == pytest.approx(1.0)
+    assert _depth_from_name(Path("01_site_EtGr_карта_01.tif")) is None
+    assert _depth_from_name(Path("gpr_1.5m.tif")) == pytest.approx(1.5)
+    assert _depth_from_name(Path("slice_150cm.tif")) == pytest.approx(1.5)
+
+
+def test_regression_gpr_skips_profiles(tmp_path: Path) -> None:
+    """Вертикальные профили EtGr не становятся срезами."""
+    from expds.data.build_gpr import _gpr_sources
+
+    et = tmp_path / "08_site_EtGr"
+    et.mkdir()
+    (et / "01_site_EtGr_карта_01_0.2.tif").write_bytes(b"")
+    (et / "01_site_EtGr_профиль_01.tif").write_bytes(b"")
+    assert [p.name for p in _gpr_sources(tmp_path)] == ["01_site_EtGr_карта_01_0.2.tif"]
