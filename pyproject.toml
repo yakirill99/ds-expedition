@@ -32,11 +32,14 @@ dev = [
     "django-debug-toolbar",
     "mercantile>=1.2.1",
     "pillow>=12.3.0",
+    "shapely>=2.2.0",
 ]
 
 [tool.ruff]
 line-length = 100
-extend-exclude = ["notebooks", "web/static", "web/media", "web/**/migrations", "vendor"]
+extend-exclude = ["notebooks", "compute_metrics.py", "web/static", "web/media", "web/**/migrations", "vendor"]
+# pre-commit передаёт файлы ruff по именам — без force-exclude исключение не работает.
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]

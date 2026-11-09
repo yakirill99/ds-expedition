@@ -1,0 +1,4 @@
+{
+  "image": "yakirill99/ds-expedition:latest",
+  "entry_point": "python solution.py"
+}

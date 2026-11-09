@@ -21,7 +21,9 @@ from typing import Any
 
 import numpy as np
 from scipy import ndimage
+from skimage.feature import peak_local_max
 from skimage.measure import find_contours
+from skimage.segmentation import watershed
 
 from expds.features.grid import Grid
 from expds.io.geojson import Detection
@@ -35,6 +37,9 @@ _EIGHT = np.ones((3, 3), dtype=bool)
 class PostConfig:
     """Параметры постобработки (секция `post` YAML), размеры в пикселях."""
 
+    branches: dict[str, str] | None = None
+    split_touching: bool = False
+    split_min_distance_px: int = 4
     seg_thr: float = 0.5
     min_area_px: float = 16.0
     simplify_px: float = 0.5
@@ -231,7 +236,26 @@ def seg_to_polygons(
     h, w = prob.shape
     if hm is None:
         hm = np.zeros((h, w), dtype=prob.dtype)
-    lab, n = ndimage.label(prob >= cfg.seg_thr, structure=_EIGHT)
+    binary = prob >= cfg.seg_thr
+    lab, n = ndimage.label(binary, structure=_EIGHT)
+    if cfg.split_touching and n:
+        # Касающиеся объекты дают одну компоненту, а метрика требует один
+        # prediction на один GT: склейка N объектов = 1 TP и N-1 FN.
+        # Watershed по расстоянию до границы режет блоб в седловинах,
+        # то есть между центрами соседних курганов.
+        dist = ndimage.distance_transform_edt(binary)
+        peaks = peak_local_max(
+            dist,
+            min_distance=cfg.split_min_distance_px,
+            threshold_abs=cfg.split_min_distance_px / 2,
+            labels=lab,
+        )
+        if len(peaks) > n:
+            markers = np.zeros(lab.shape, dtype=np.int32)
+            for j, (r, c) in enumerate(peaks, start=1):
+                markers[r, c] = j
+            lab = watershed(-dist, markers, mask=binary).astype(np.int32)
+            n = int(lab.max())
     dets: list[Detection] = []
     for i, sl in enumerate(ndimage.find_objects(lab), start=1):
         if sl is None:
@@ -301,6 +325,29 @@ def heatmap_to_points(hm: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> 
 # --- всё вместе ----------------------------------------------------------------
 
 
+# Heatmap-ветка включается только вместе с геофизическими каналами:
+# единственный Point-класс (finds_points) в лидарной разметке отсутствует,
+# а полигональным классам точечные предсказания дают только FP.
+BRANCH_POLYGON = "polygon"
+BRANCH_POINT = "point"
+BRANCH_BOTH = "both"
+BRANCHES = (BRANCH_POLYGON, BRANCH_POINT, BRANCH_BOTH)
+
+
+def _branch_for(cls: str, cfg: "PostConfig") -> str:
+    """Какие ветки включать для класса.
+
+    По умолчанию обе — исходное поведение, на нём держатся тесты и
+    весь дальнейший пайплайн. Лидарный конфиг переопределяет: у шести
+    классов из семи разметка полигональная, и точка с полигоном не
+    проходит IoU>=0.5, то есть точечные предсказания по ним — чистый FP.
+    """
+    b = (cfg.branches or {}).get(cls, BRANCH_BOTH)
+    if b not in BRANCHES:
+        raise ValueError(f"post.branches[{cls!r}]={b!r}, ожидалось одно из {BRANCHES}")
+    return b
+
+
 def postprocess(
     probs: np.ndarray,
     grid: Grid,
@@ -323,6 +370,9 @@ def postprocess(
         probs = probs * m.astype(probs.dtype)[None]
     dets: list[Detection] = []
     for i, cls in enumerate(classes):
-        dets += seg_to_polygons(probs[i], grid, cls, cfg, hm=probs[k + i])
-        dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
+        branch = _branch_for(cls, cfg)
+        if branch in (BRANCH_POLYGON, BRANCH_BOTH):
+            dets += seg_to_polygons(probs[i], grid, cls, cfg)
+        if branch in (BRANCH_POINT, BRANCH_BOTH):
+            dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
     return nms_centroids(dets, cfg.nms_radius_px * grid.pixel_size)[: cfg.max_detections]

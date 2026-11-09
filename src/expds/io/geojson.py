@@ -37,6 +37,7 @@ _SOURCE_KEY = "source"
 _DEFAULT_CLASS_KEY = "class"
 _SCORE_KEY = "score"
 _AREA_EPS = 1e-12
+_COORD_NDIGITS = 9  # 9 знаков в метрах Меркатора ≈ 1 нм; лимит регламента — 15
 
 
 # ------------------------------------------------------------
@@ -301,6 +302,8 @@ def write_detections(
     src_crs: str,
     dst_crs: str,
     class_key: str = _DEFAULT_CLASS_KEY,
+    score_key: str = _SCORE_KEY,
+    extra_properties: Any = None,
 ) -> int:
     """Пишет детекции в GeoJSON в dst_crs.
 
@@ -309,7 +312,12 @@ def write_detections(
         detections: детекции в src_crs (crs.internal).
         src_crs: CRS координат детекций.
         dst_crs: CRS выхода (crs.output, EPSG:3857).
-        class_key: имя свойства с классом.
+        class_key: имя свойства с классом. Для сабмита — "class_name"
+            (Технический регламент КОЗ №3, Приложение 1, требование к выходу).
+        score_key: имя свойства с уверенностью. Для сабмита — "confidence".
+        extra_properties: dict или вызываемый (Detection) -> dict. Дозаписывается
+            в properties поверх class_key/score_key. Нужен, чтобы дублировать
+            class/score для локальной метрики при class_name/confidence для сабмита.
 
     Returns:
         Число записанных объектов.
@@ -324,15 +332,26 @@ def write_detections(
             rings = [_transform(transformer, r) for r in (det.geometry, *det.holes)]
             geometry = {
                 "type": GEOM_POLYGON,
-                "coordinates": polygon_rings_to_coords(rings),
+                "coordinates": [
+                    [
+                        [round(float(c[0]), _COORD_NDIGITS), round(float(c[1]), _COORD_NDIGITS)]
+                        for c in ring
+                    ]
+                    for ring in polygon_rings_to_coords(rings)
+                ],
             }
         features.append(
             {
                 "type": "Feature",
                 "properties": {
                     class_key: det.cls,
-                    _SCORE_KEY: float(det.score),
+                    score_key: float(det.score),
                     _SOURCE_KEY: det.source,
+                    **(
+                        extra_properties(det)
+                        if callable(extra_properties)
+                        else (extra_properties or {})
+                    ),
                 },
                 "geometry": geometry,
             }

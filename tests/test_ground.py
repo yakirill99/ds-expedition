@@ -169,3 +169,46 @@ class TestErrors:
         x, y, z = _make_flat_ground(n=100)
         with pytest.raises(ValueError, match="preset"):
             filter_ground(x=x, y=y, z=z, config=config, crs="EPSG:32617")
+
+
+def test_regression_min_surface_no_half_pixel_shift() -> None:
+    """Все точки в первой половине ячейки -> min surface = min(z), не inf.
+
+    Баг: transform_to_pixel + floor давал col = -1 для x в первой половине
+    пикселя, и _build_min_surface отбрасывал эти точки как «вне сетки».
+    На плоской земле с точками в первой половине ячейки поверхность
+    оставалась inf/nan и заполнялась соседями — сдвиг на полпикселя.
+    """
+    from expds.features.ground import _build_grid_from_points, _build_min_surface
+
+    x = np.full(100, 0.1, dtype=np.float64)
+    y = np.full(100, 0.1, dtype=np.float64)
+    z = np.full(100, 10.0, dtype=np.float64)
+
+    grid = _build_grid_from_points(x=x, y=y, cell_size=1.0, crs="EPSG:32617")
+    surface = _build_min_surface(x=x, y=y, z=z, grid=grid)
+    assert float(surface[0, 0]) == pytest.approx(10.0)
+
+
+def test_regression_classify_points_no_half_pixel_shift() -> None:
+    """Точка в первой половине ячейки классифицируется по своей ячейке."""
+    from expds.features.ground import _build_grid_from_points, _classify_points
+
+    x = np.full(10, 0.1, dtype=np.float64)
+    y = np.full(10, 0.1, dtype=np.float64)
+    z = np.full(10, 10.0, dtype=np.float64)
+
+    grid = _build_grid_from_points(x=x, y=y, cell_size=1.0, crs="EPSG:32617")
+    surface = np.full(grid.shape, 10.0, dtype=np.float32)
+    slope = np.zeros(grid.shape, dtype=np.float32)
+    ground = _classify_points(
+        x=x,
+        y=y,
+        z=z,
+        surface=surface,
+        slope=slope,
+        grid=grid,
+        height_threshold=0.5,
+        slope_threshold=0.2,
+    )
+    assert ground.all()
