@@ -12,6 +12,12 @@ NMS -> матчинг), и каждый объект получает причи
 - ``контур``      — полигон построен, но не прошёл матчинг (IoU ниже порога);
 - ``ок``          — объект нашёлся (TP).
 
+При eval.ignore_offgrid=true объекты «вне сетки» исключаются из матчинга
+(не считаются FN): ни одна модель не может детектировать то, чего нет на
+растровых данных. Аудит 2026-11-11 (docs/issues/07-grid-coverage.md): 456
+из 461 FN оракула на night3 — именно они; гейт обучения блокировался
+объектами вне bbox растра, а не ошибками пайплайна.
+
 Функция :func:`oracle_report` возвращает стадии и причины — её печатают
 scripts/oracle_diag.py (локально, на реальных участках) и используют тесты.
 """
@@ -55,6 +61,7 @@ class OracleReport:
     """Стадии потерь по одному участку (или суммарно по нескольким)."""
 
     gt_total: int = 0
+    gt_offgrid: int = 0  # «вне сетки»; при ignore_offgrid исключены из матчинга
     raster_zero: int = 0  # маска пуста после растеризации
     raster_below_min_area: int = 0  # маска есть, но < min_area_px
     valid_killed: int = 0  # вырезаны маской валидности
@@ -69,6 +76,7 @@ class OracleReport:
     def to_dict(self) -> dict[str, object]:
         return {
             "gt_total": self.gt_total,
+            "gt_offgrid": self.gt_offgrid,
             "raster_zero": self.raster_zero,
             "raster_below_min_area": self.raster_below_min_area,
             "valid_killed": self.valid_killed,
@@ -209,19 +217,28 @@ def oracle_report(
     dets_after = nms_centroids(dets_poly, post.nms_radius_px * grid.pixel_size)
     dets_after += nms_centroids(dets_hm, point_r * grid.pixel_size)
     # Склейка веток BOTH — как в postprocess.
-    dets_after = nms_centroids(
-        dets_after, min(post.nms_radius_px, point_r) * grid.pixel_size
-    )
+    dets_after = nms_centroids(dets_after, min(post.nms_radius_px, point_r) * grid.pixel_size)
     report.post_nms_dets = len(dets_after)
     report.nms_suppressed = report.pre_nms_dets - report.post_nms_dets
     kept_ids = {id(d) for d in dets_after}
     pre_by_id = {id(d): d for d in [*dets_poly, *dets_hm]}
 
     # --- матчинг -------------------------------------------------------------
+    # GT без единого пикселя в сетке (om_raw is None) недетектируем в принципе.
+    # При ignore_offgrid исключаем их из матчинга: они не должны считать FN
+    # и топить гейт обучения (аудит 2026-11-11: 456/461 FN — «вне сетки»).
+    ignore_offgrid = bool(eval_cfg.ignore_offgrid) if eval_cfg is not None else False
+    if ignore_offgrid:
+        keep_idx = [gi for gi, raw in enumerate(obj_mask_raw) if raw is not None]
+        gts_eval = [gts[gi] for gi in keep_idx]
+    else:
+        keep_idx = list(range(len(gts)))
+        gts_eval = list(gts)
     preds = objects_from_detections(dets_after)
-    res = evaluate(preds, gts, eval_cfg)
+    res = evaluate(preds, gts_eval, eval_cfg)
     report.match = res[ALL]
-    matched_gt = {gi for _, gi, _ in res[ALL].pairs}
+    # Индексы пар — по gts_eval; возвращаем к индексам полного gts.
+    matched_gt = {keep_idx[gi] for _, gi, _ in res[ALL].pairs}
 
     # --- причины потерь ------------------------------------------------------
     for gi, gt in enumerate(gts):
@@ -238,6 +255,9 @@ def oracle_report(
             else:
                 report.reasons[LOST_GRID] = report.reasons.get(LOST_GRID, 0) + 1
                 report.raster_zero += 1
+                if ignore_offgrid:
+                    # исключены из матчинга выше — отдельно считаем для отчёта
+                    report.gt_offgrid += 1
             continue
         is_poly = feats_in[gi].geom_type == "Polygon"
         if is_poly and int(om.sum()) < post.min_area_px:

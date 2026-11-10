@@ -381,6 +381,7 @@ def stack_layers(
 
     tensor = np.zeros((n_channels, height, width), dtype=np.float32)
     channel_mask = np.zeros((n_channels,), dtype=bool)
+    missing: list[str] = []
 
     for idx, name in enumerate(spec.channel_names):
         layer = layers_by_name.get(name)
@@ -392,7 +393,10 @@ def stack_layers(
                 logger.info("Канал '%s' взят из слоя '%s'", name, cand[0])
                 layer = layers_by_name[cand[0]]
         if layer is None:
-            logger.warning("Канал '%s' отсутствует, заполняем нулями (mask=False)", name)
+            # Одна строка на участок вместо warning'а на каждый канал:
+            # конфиги с 31 каналом на фото/лидар-участках без облака точек
+            # и магнитки сыпали 5-7 одинаковых предупреждений подряд.
+            missing.append(name)
             continue
 
         if layer.grid != spec.grid:
@@ -406,6 +410,9 @@ def stack_layers(
         data[~layer.valid_mask] = 0.0
         tensor[idx] = data
         channel_mask[idx] = True
+
+    if missing:
+        logger.warning("Каналы отсутствуют, заполняем нулями (mask=False): %s", ", ".join(missing))
 
     extra = set(layers_by_name) - set(spec.channel_names)
     if extra:

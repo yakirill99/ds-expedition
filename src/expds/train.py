@@ -29,12 +29,14 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from expds.eval.metric import (
     ALL,
+    WEB_MERCATOR_R,
     EvalObject,
     MatchResult,
     evaluate,
     objects_from_detections,
     read_objects,
 )
+from expds.features.grid import Grid
 from expds.infer import autocast, detect, predict_probs, resolve_device
 from expds.io.geojson import Detection, write_detections
 from expds.models.base import BaseSegmenter
@@ -128,6 +130,54 @@ def _to_eval_objects(
         io_logger.setLevel(level)
 
 
+def _offgrid_keep_mask(
+    gts: Sequence[EvalObject], grid: Grid, eval_crs: str, r_tol: float, r_tol_units: str
+) -> np.ndarray:
+    """Маска «GT-объект пересекает сетку участка» в координатах метрики.
+
+    GT, целиком выпавшие из растра, недетектируемы (аудит 2026-11-11: 456
+    из 461 FN оракула на night3 — они); при eval.ignore_offgrid они
+    исключаются из val-метрики и гейта. Частично вошедшие остаются.
+
+    След сетки в eval_crs — bbox плотной выборки его границы (выпуклая
+    оболочка следа: ничего внутреннего не теряем при любом переходе CRS).
+    Точкам GT даём запас r_tol (как в матчере).
+    """
+    ps = grid.pixel_size
+    n = 16
+    xs = np.linspace(grid.x_min, grid.x_min + grid.width * ps, n)
+    ys = np.linspace(grid.y_min, grid.y_min + grid.height * ps, n)
+    border = np.array(
+        [(x, ys[0]) for x in xs]
+        + [(x, ys[-1]) for x in xs]
+        + [(xs[0], y) for y in ys]
+        + [(xs[-1], y) for y in ys]
+    )
+    if grid.crs != eval_crs:
+        from pyproj import Transformer
+
+        tr = Transformer.from_crs(grid.crs, eval_crs, always_xy=True)
+        bx, by = tr.transform(border[:, 0], border[:, 1])
+        border = np.column_stack([bx, by])
+    lo, hi = border.min(0), border.max(0)
+    if not len(gts):
+        return np.zeros(0, dtype=bool)
+    is_point = np.array([g.geom_type == "Point" for g in gts])
+    margin = np.full(len(gts), float(r_tol))
+    if r_tol_units == "meters" and is_point.any():
+        # Тот же пересчёт «метры на местности -> EPSG:3857», что в матчере.
+        y_pt = np.array([g.centroid[1] for g, p in zip(gts, is_point, strict=True) if p])
+        margin[is_point] = float(r_tol) * np.cosh(y_pt / WEB_MERCATOR_R)
+    gbox = np.array([g.bbox for g in gts])
+    keep = (
+        (gbox[:, 0] <= hi[0] + margin)
+        & (gbox[:, 2] >= lo[0] - margin)
+        & (gbox[:, 1] <= hi[1] + margin)
+        & (gbox[:, 3] >= lo[1] - margin)
+    )
+    return keep
+
+
 def _score(
     probs: np.ndarray,
     site: SiteData,
@@ -145,7 +195,13 @@ def _score(
     """
     dets = detect(probs, site, cfg.targets.classes, cfg.post)
     preds = _to_eval_objects(dets, site.grid.crs, eval_crs, tmp_dir)
-    res = evaluate(preds, list(gts), cfg.eval)
+    gts_used: Sequence[EvalObject] = list(gts)
+    if cfg.eval.ignore_offgrid and gts_used:
+        keep = _offgrid_keep_mask(
+            gts_used, site.grid, eval_crs, cfg.eval.r_tol, cfg.eval.r_tol_units
+        )
+        gts_used = [g for g, k in zip(gts_used, keep, strict=True) if k]
+    res = evaluate(preds, gts_used, cfg.eval)
     r = res["__all__"]
     total.tp += r.tp
     total.fp += r.fp
@@ -305,6 +361,21 @@ def fit(
         oracle = None
         if val_sets:
             oracle_per_cls: dict[str, MatchResult] = {}
+            if cfg.eval.ignore_offgrid:
+                # Прозрачность новой семантики метрики: сколько GT каждого
+                # val-участка недетектируемо (целиком вне растра) и потому
+                # исключено из val_f1 и гейта.
+                for site, gts in val_sets:
+                    keep = _offgrid_keep_mask(
+                        gts, site.grid, eval_crs, cfg.eval.r_tol, cfg.eval.r_tol_units
+                    )
+                    n_off = len(gts) - int(keep.sum())
+                    if n_off:
+                        print(
+                            f"  {site.name}: GT {len(gts)}, вне сетки {n_off} — "
+                            f"исключены из метрики и гейта (eval.ignore_offgrid)",
+                            flush=True,
+                        )
             oracle = _oracle(val_sets, cfg, eval_crs, Path(tmp), oracle_per_cls).to_dict()
             print(
                 f"oracle val f1 {oracle['f1']:.3f} p {oracle['precision']:.3f} "
@@ -324,7 +395,8 @@ def fit(
                     f"oracle gate: f1 {oracle_f1:.3f} < порога {tc.oracle_gate:.2f} — "
                     f"пайплайн теряет эталон до модели (tp {oracle['tp']} fp {oracle['fp']} "
                     f"fn {oracle['fn']}). Обучение даст ложную метрику. Сначала прогоните "
-                    f"scripts/oracle_diag.py --config <конфиг> и почините post/данные."
+                    f"scripts/oracle_diag.py --config <конфиг> и почините post/данные "
+                    f"(при GT вне сетки участка включите eval.ignore_offgrid)."
                 )
             if tc.oracle_gate <= 0 and oracle_f1 < 0.95:
                 print(

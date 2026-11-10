@@ -109,7 +109,9 @@ def print_report(name: str, rep: OracleReport) -> None:
         f"f1 {m.f1:.3f} (tp {m.tp} fp {m.fp} fn {m.fn})"
     )
     print(
-        f"потери: вне сетки {rep.raster_zero} | valid/nodata {rep.valid_killed} | "
+        f"потери: вне сетки {rep.raster_zero}"
+        f"{' (исключены из метрики)' if rep.gt_offgrid else ''}"
+        f" | valid/nodata {rep.valid_killed} | "
         f"min_area {rep.raster_below_min_area} | слияние (не разделено) {rep.merged_unresolved} "
         f"(слитых компонент {rep.merged_components}) | NMS {rep.nms_suppressed} "
         f"(было детекций {rep.pre_nms_dets}, осталось {rep.post_nms_dets})"
@@ -184,6 +186,7 @@ def main(argv: list[str] | None = None) -> None:
             )
             print_report(name, rep)
             total.gt_total += rep.gt_total
+            total.gt_offgrid += rep.gt_offgrid
             total.raster_zero += rep.raster_zero
             total.raster_below_min_area += rep.raster_below_min_area
             total.valid_killed += rep.valid_killed
