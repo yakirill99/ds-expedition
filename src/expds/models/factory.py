@@ -46,13 +46,22 @@ def input_divisor(cfg: ModelConfig) -> int:
     return 32 if cfg.arch == "unet" else 1
 
 
-def build_model(cfg: ModelConfig, in_channels: int, num_classes: int) -> BaseSegmenter:
+def build_model(
+    cfg: ModelConfig, in_channels: int, num_classes: int, pretrained: bool = False
+) -> BaseSegmenter:
     k = out_channels(num_classes)
     if cfg.arch == "stub":
         model: BaseSegmenter = StubSegmenter(in_channels, k, kernel_size=cfg.stub_kernel)
     else:
+        # ImageNet-веса: с нуля на 30 каналах и 40 участках энкодер не
+        # обучается (Dice 0.4 за 150 эпох). Первый слой всё равно
+        # расходится по in_channels, но остальные блоки получают
+        # рабочие фильтры.
         model = UNetSegmenter(
-            encoder_name=cfg.encoder, encoder_weights=None, in_channels=in_channels, classes=k
+            encoder_name=cfg.encoder,
+            encoder_weights="imagenet" if pretrained else None,
+            in_channels=in_channels,
+            classes=k,
         )
     _init_prior(model, k, cfg.prior_prob)
     return model

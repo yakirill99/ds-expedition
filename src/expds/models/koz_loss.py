@@ -10,6 +10,14 @@ import torch.nn.functional as F
 
 from .factory import split_heads
 
+# Веса классов как в официальной метрике КОЗ-3 (compute_metrics.py,
+# CLASS_WEIGHTS). Порядок = cfg.targets.classes из configs/night.yaml:
+# ('kurgany_tselye', 'kurgany_povrezhdennye', 'gorodishcha', 'fortifikatsii',
+#  'arkhitektury', 'finds_points', 'object_poly').
+# fortifikatsii — 303 объекта при весе 5, gorodishcha — 5 объектов при весе 15:
+# равное взвешивание тратит ёмкость модели на самый дешёвый класс.
+_CLASS_WEIGHTS = (20.0, 30.0, 15.0, 5.0, 10.0, 10.0, 10.0)
+
 
 @dataclass(frozen=True)
 class LossConfig:
@@ -100,8 +108,15 @@ class KozLoss(nn.Module):
         mask = m * observed[:, :, None, None]
         axes = (0, 2, 3)
         counts = mask.sum(dim=axes)
-        # Полностью ненаблюдаемый класс даёт ноль, а не лосс по фону.
-        weights = (counts > 0).to(seg.dtype)
+        gt_counts = (y_seg * mask).sum(dim=axes)
+        # Класс, которого нет в батче, даёт inter=0, den=0 -> dice=1 и лосс 0.
+        # Такой класс не должен входить в среднее: на редких объектах 3-4
+        # класса из четырёх регулярно пустые, и лог показывал Dice 0.85
+        # при реальных 0.20. Считаем только классы, реально присутствующие.
+        present = (counts > 0) & (gt_counts > 0)
+        weights = present.to(seg.dtype)
+        if self.k == len(_CLASS_WEIGHTS):
+            weights = weights * torch.tensor(_CLASS_WEIGHTS, device=seg.device, dtype=seg.dtype)
         weights = weights / weights.sum().clamp_min(1.0)
         n_px = counts.clamp_min(1.0)
 

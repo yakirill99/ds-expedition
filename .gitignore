@@ -66,3 +66,6 @@ configs/split_*.yaml
 data/survey*.json
 .#*
 *~
+
+dockerctx/
+base_0100/

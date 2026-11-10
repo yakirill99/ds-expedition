@@ -1,0 +1,3 @@
+FROM yakirill99/ds-expedition:latest
+COPY dockerctx/config.yaml /app/config.yaml
+COPY dockerctx/weights.pt /app/weights.pt

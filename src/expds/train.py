@@ -53,6 +53,8 @@ class TrainConfig:
     """Параметры обучения (секция `train` YAML)."""
 
     epochs: int = 10
+    min_epoch: int = 20
+    min_delta: float = 0.002
     batch_size: int = 8
     lr: float = 1e-3
     weight_decay: float = 1e-4
@@ -208,7 +210,12 @@ def fit(
         raise ValueError(f"каналы участков {channels} != data.channels {cfg.data.channels}")
     eval_crs = eval_crs or cfg.data.labels_crs
 
-    model = (model or build_model(cfg.model, len(channels), len(classes))).to(device)
+    # Предобученный энкодер только на старте обучения: load_checkpoint
+    # собирает модель с pretrained=False, иначе инференс в офлайн-докере
+    # уходит за 87 МБ на HuggingFace.
+    model = (model or build_model(cfg.model, len(channels), len(classes), pretrained=True)).to(
+        device
+    )
     loss_fn = KozLoss(len(classes), cfg.loss)
     ds = KozDataset(train_sites, cfg.tiles.tile_px, cfg.tiles.overlap_px)
     weights = torch.as_tensor(
@@ -293,9 +300,20 @@ def fit(
             history.append(rec)
 
             extra = {"epoch": epoch, "train_loss": rec["train_loss"], "val_f1": rec.get("val_f1")}
-            if key > best_key:
+            # Ранние эпохи дают случайный ключ: f1 0.018 на 3-й эпохе
+            # перебивает 0.009 на 150-й, и в best.pt уходит недообученная
+            # модель (Dice 0.12 против 0.85). Отбор начинается после min_epoch.
+            if epoch >= tc.min_epoch and key > best_key + tc.min_delta:
                 best_key = key
                 save_checkpoint(run_dir / "best.pt", model, cfg.model, channels, classes, extra)
+            if epoch % 10 == 0:
+                save_checkpoint(
+                    run_dir / f"ep{epoch:03d}.pt", model, cfg.model, channels, classes, extra
+                )
+        if val_sets and not (run_dir / "best.pt").exists():
+            # min_epoch может оказаться больше epochs — тогда отбор не
+            # срабатывает ни разу, а predict ждёт best.pt.
+            save_checkpoint(run_dir / "best.pt", model, cfg.model, channels, classes, extra)
         save_checkpoint(run_dir / "last.pt", model, cfg.model, channels, classes, extra)
     return {"best": best_key, "history": history, "oracle": oracle}
 
