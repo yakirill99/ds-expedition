@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from expds.models.koz_loss import KozLoss
+from expds.models.koz_loss import _CLASS_NAMES, _CLASS_WEIGHTS_BY_NAME, KozLoss
 
 
 def test_y_valid_zeroes_class() -> None:
@@ -93,3 +93,73 @@ def test_regression_loss_common_class_mask_matches_broadcast():
     torch.testing.assert_close(
         fn(x, s, h, v, common)["loss"], fn(x, s, h, v, common.expand(3, 2))["loss"]
     )
+
+
+def test_point_only_class_learns_hm() -> None:
+    """Точечный класс (y_seg==0, y_hm с пиком) получает градиент в hm-голову.
+
+    Регрессия: присутствие класса определялось по gt_counts>0 (по y_seg),
+    поэтому finds_points — единственный Point-класс — не получал градиент
+    вообще, hm-голова оставалась на prior-инициализации и находки не
+    детектировались.
+    """
+    torch.manual_seed(0)
+    k, b, t = 2, 1, 32
+    loss_fn = KozLoss(k)
+    logits = torch.zeros(b, 2 * k, t, t, requires_grad=True)
+    y_seg = torch.zeros(b, k, t, t)
+    y_hm = torch.zeros(b, k, t, t)
+    y_hm[:, 1, 16, 16] = 1.0  # класс 1 существует только в heatmap
+
+    out = loss_fn(logits, y_seg, y_hm)
+    out["loss"].backward()
+
+    assert out["hm"].item() > 0
+    hm_grad = logits.grad[0, k + 1]  # hm-канал класса 1
+    assert hm_grad.abs().sum() > 0
+    assert torch.isfinite(out["loss"]).all()
+
+
+def test_point_only_class_respects_y_valid() -> None:
+    """Точечный класс с y_valid=0 (модальность не снималась) не получает градиент."""
+    torch.manual_seed(0)
+    k, b, t = 2, 1, 32
+    loss_fn = KozLoss(k)
+    y_seg = torch.zeros(b, k, t, t)
+    y_hm = torch.zeros(b, k, t, t)
+    y_hm[:, 1, 16, 16] = 1.0
+
+    lg1 = torch.zeros(b, 2 * k, t, t, requires_grad=True)
+    loss_fn(lg1, y_seg, y_hm, None, torch.ones(k))["loss"].backward()
+    assert lg1.grad[0, k + 1].abs().sum() > 0  # класс наблюдаем — hm-голова учится
+
+    lg2 = torch.zeros(b, 2 * k, t, t, requires_grad=True)
+    loss_fn(lg2, y_seg, y_hm, None, torch.tensor([1.0, 0.0]))["loss"].backward()
+    assert lg2.grad[0, k + 1].abs().sum() == 0  # y_valid=0 — градиента нет
+
+
+def test_class_weights_follow_names() -> None:
+    """Веса привязаны к именам классов, а не к позиции в списке."""
+    torch.manual_seed(0)
+    # Тот же регламентный набор в другом порядке: вес каждого слота = вес его имени.
+    order = (2, 0, 4, 6, 1, 5, 3)
+    classes = tuple(_CLASS_NAMES[i] for i in order)
+    loss_fn = KozLoss(7, classes=classes)
+    total = sum(loss_fn._weights.tolist())
+    assert total == pytest.approx(100.0)
+    for slot, name in enumerate(classes):
+        assert loss_fn._weights[slot].item() == pytest.approx(_CLASS_WEIGHTS_BY_NAME[name])
+    # Нормированные веса: сумма = 1, каждый = вес класса / 100.
+    w = loss_fn._weighted(torch.ones(7), torch.zeros(1))
+    assert w.sum().item() == pytest.approx(1.0)
+    for slot, name in enumerate(classes):
+        assert w[slot].item() == pytest.approx(_CLASS_WEIGHTS_BY_NAME[name] / total)
+
+    # Вне регламентного набора — равные веса, без ошибок (синтетика/тесты).
+    assert KozLoss(2, classes=("mound", "ditch"))._weights is None
+
+    # Регламентный набор с опечаткой — ошибка конфига, не молчаливые чужие веса.
+    bad = list(_CLASS_NAMES)
+    bad[3] = "fortifikatsiya"
+    with pytest.raises(ValueError, match="нет весов"):
+        KozLoss(7, classes=tuple(bad))

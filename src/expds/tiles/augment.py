@@ -8,13 +8,22 @@
 соглашение "row 0 = юг". Восстановление геометрии при инференсе не требуется,
 потому что аугментации живут только в train-цикле (см. AugmentedDataset).
 
-Каналы НЕ переставляются: порядок фиксирован контрактом модели и сохраняется
-в чекпоинт. Dropout лишь зануляет выбранный канал и снимает его в channel_mask.
+Каналы направления правятся вместе с геометрией (aspect_sin/cos, aspect,
+hillshade_az_*): после зеркала/поворота рельефа «сток на юг»/«солнце с СВ»
+остаются на месте только если преобразовать и их значения. Для hillshade
+с симметричным набором азимутов (45/135/225/315) это взаимная перестановка
+каналов; aspect преобразуется как вектор (sin, cos) или угол в градусах.
+Если набор hillshade-азимутов не замкнут относительно преобразования,
+эти каналы не переставляются (лучше неточная перестановка, чем неверная).
+Порядок каналов как таковой не меняется: он фиксирован контрактом модели
+и сохраняется в чекпоинт. Dropout лишь зануляет выбранный канал и снимает
+его в channel_mask.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -82,6 +91,101 @@ def _rot90(t: torch.Tensor, k: int) -> torch.Tensor:
     return torch.rot90(t, k=k % 4, dims=[-2, -1])
 
 
+# --- каналы направления ---------------------------------------------------------
+
+_ASPECT_SIN = "aspect_sin"
+_ASPECT_COS = "aspect_cos"
+_ASPECT_DEG = "aspect"
+_HILLSHADE_PREFIX = "hillshade_az_"
+
+
+def _direction_channels(
+    channel_names: Sequence[str],
+) -> tuple[int | None, int | None, int | None, dict[float, int]]:
+    """Индексы каналов направления: (sin, cos, градусы, {азимут: индекс})."""
+    sin_i = cos_i = deg_i = None
+    hs: dict[float, int] = {}
+    for i, name in enumerate(channel_names):
+        if name == _ASPECT_SIN:
+            sin_i = i
+        elif name == _ASPECT_COS:
+            cos_i = i
+        elif name == _ASPECT_DEG:
+            deg_i = i
+        elif name.startswith(_HILLSHADE_PREFIX):
+            try:
+                az = float(name[len(_HILLSHADE_PREFIX) :])
+            except ValueError:
+                continue
+            hs[az] = i
+    return sin_i, cos_i, deg_i, hs
+
+
+def _fix_direction_channels(
+    x: torch.Tensor,
+    channel_names: Sequence[str] | None,
+    *,
+    hflip: bool,
+    vflip: bool,
+    rot90: int,
+) -> torch.Tensor:
+    """Приводит каналы направления в соответствие с новой геометрией (in-place).
+
+    Мировые оси: +col = восток, +row = север (row 0 = юг). hflip (fliplr)
+    зеркалит восток-запад, vflip (flipud) — север-юг, rot90(k) поворачивает
+    сцену по часовой на 90k (азимут +90k). Азимут — от севера по часовой.
+    """
+    if not channel_names:
+        return x
+    sin_i, cos_i, deg_i, hs = _direction_channels(channel_names)
+    k = rot90 % 4
+
+    if sin_i is not None and cos_i is not None:
+        s, c = x[:, sin_i].clone(), x[:, cos_i].clone()
+        if hflip:
+            s, c = -s, c
+        if vflip:
+            s, c = s, -c
+        if k == 1:
+            s, c = c, -s
+        elif k == 2:
+            s, c = -s, -c
+        elif k == 3:
+            s, c = -c, s
+        x[:, sin_i], x[:, cos_i] = s, c
+
+    if deg_i is not None:
+        a = x[:, deg_i]
+        if hflip:
+            a = -a
+        if vflip:
+            a = 180.0 - a
+        x[:, deg_i] = (a + 90.0 * k) % 360.0
+
+    if hs:
+        # Откуда брать содержимое для слота az: g(az) — обращение всех шагов
+        # (hflip, vflip, rot) к азимуту канала-источника. Для поворота это
+        # az - 90k (сцена повернулась на +90k, солнце относительно сцены —
+        # на -90k), зеркала обратимы сами в себе: -az и 180-az.
+        mapping: dict[float, float] = {}
+        for az in hs:
+            src = az
+            if hflip:
+                src = -src
+            if vflip:
+                src = 180.0 - src
+            src = (src - 90.0 * k) % 360.0
+            if src not in hs:
+                mapping.clear()
+                break
+            mapping[az] = src
+        if mapping:
+            source = x.clone()
+            for az, src in mapping.items():
+                x[:, hs[az]] = source[:, hs[src]]
+    return x
+
+
 def geometric(
     x: torch.Tensor,
     y_seg: torch.Tensor | None,
@@ -91,6 +195,7 @@ def geometric(
     hflip: bool = False,
     vflip: bool = False,
     rot90: int = 0,
+    channel_names: Sequence[str] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor]:
     """Применяет одну и ту же геометрию ко всем тайлам батча.
 
@@ -102,6 +207,9 @@ def geometric(
         hflip: отразить по горизонтали.
         vflip: отразить по вертикали.
         rot90: число поворотов на 90 градусов.
+        channel_names: имена каналов x; по ним правятся каналы направления
+            (aspect_*, hillshade_az_*). None — не трогать ничего (старое
+            поведение для тестов).
 
     Returns:
         Кортеж (x, y_seg, y_hm, valid) той же формы.
@@ -121,6 +229,7 @@ def geometric(
         valid = _rot90(valid, rot90)
         y_seg = None if y_seg is None else _rot90(y_seg, rot90)
         y_hm = None if y_hm is None else _rot90(y_hm, rot90)
+    x = _fix_direction_channels(x, channel_names, hflip=hflip, vflip=vflip, rot90=rot90)
     return x, y_seg, y_hm, valid
 
 
@@ -191,6 +300,12 @@ class AugmentedDataset(Dataset):
         self._cfg = cfg
         self._seed = seed
         self._epoch = 0
+        # Имена каналов — для правки каналов направления при flip/rot90.
+        # sites проксируется через __getattr__; при отсутствии (обёртка над
+        # другим датасетом) каналы не трогаем.
+        sites = getattr(base, "sites", None)
+        names = getattr(sites[0], "channel_names", None) if sites else None
+        self._channel_names: tuple[str, ...] | None = tuple(names) if names else None
 
     # --- прокси -------------------------------------------------------------
 
@@ -231,7 +346,14 @@ class AugmentedDataset(Dataset):
         y_hm = item["y_hm"].unsqueeze(0) if "y_hm" in item else None
 
         x, y_seg, y_hm, valid = geometric(
-            x, y_seg, y_hm, valid, hflip=hflip, vflip=vflip, rot90=rot
+            x,
+            y_seg,
+            y_hm,
+            valid,
+            hflip=hflip,
+            vflip=vflip,
+            rot90=rot,
+            channel_names=self._channel_names,
         )
 
         item["x"] = x.squeeze(0)

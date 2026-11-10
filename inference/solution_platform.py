@@ -12,10 +12,12 @@ config.yaml и weights.pt лежат в образе по /app. Поэтому �
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -95,6 +97,18 @@ def _writable_copy(input_dir: Path, dest: Path) -> Path:
     return dest
 
 
+def _write_empty(out: Path, crs: str = "EPSG:3857") -> None:
+    """Пустой FeatureCollection в контракте выхода (крайний случай)."""
+    epsg = crs.split(":")[-1] if ":" in crs else crs
+    fc = {
+        "type": "FeatureCollection",
+        "crs": {"type": "name", "properties": {"name": f"urn:ogc:def:crs:EPSG::{epsg}"}},
+        "features": [],
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -141,6 +155,17 @@ def main(argv: list[str] | None = None) -> int:
                 "auto",
             ]
         )
+    except Exception:
+        # Непойманное исключение = код != 0 и нет файла: платформа тратит
+        # попытку впустую. Пустой FeatureCollection даёт 0 баллов по региону,
+        # но запуск остаётся валидным; traceback уходит в лог платформы.
+        print("пайплайн упал — пишу пустой FeatureCollection", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        try:
+            _write_empty(out_path)
+        except Exception:
+            traceback.print_exc()
+        return 0
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

@@ -20,6 +20,9 @@ def fix_fields(src: Path, dst: Path, region: str) -> None:
         p["class_name"] = p.get("class_name") or p.get("class")
         p["region_name"] = p.get("region_name") or region
         p["markup_type"] = p.get("markup_type") or "лидар"
+        # confidence обязателен: без него compute_metrics подставляет 1.0
+        # для всех, и жадный матчинг теряет порядок по уверенности.
+        p["confidence"] = p.get("confidence") or p.get("score") or 1.0
     dst.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
 
@@ -32,8 +35,8 @@ def score(ckpt: Path, run: Path, sites: list[str] | None = None) -> float:
     targets = sites or list(cfg.train.val_sites)
     tmp = Path(tempfile.mkdtemp())
 
-    dets, feats = [], []
-    for name in targets:
+    pred_features, feats = [], []
+    for i, name in enumerate(targets):
         site = load_site(
             cfg.data.sites_dir / name,
             channels=cfg.data.channels,
@@ -54,7 +57,25 @@ def score(ckpt: Path, run: Path, sites: list[str] | None = None) -> float:
             cfg.train.batch_size,
             cfg.train.amp,
         )
-        dets += detect(probs, site, cfg.targets.classes, cfg.post)
+        dets = detect(probs, site, cfg.targets.classes, cfg.post)
+        # Детекции живут в crs.internal участка (UTM), а не в labels_crs:
+        # писать их с заявленным EPSG:3857 — подмена координат. Раньше это
+        # «работало» только потому, что auto-режим метрики пропускает UTM
+        # как есть (max|x| <= 1e6). Конвертация в 3857 здесь честная.
+        part = tmp / f"p_{i}.geojson"
+        write_detections(
+            part,
+            dets,
+            site.grid.crs,
+            "EPSG:3857",
+            class_key="class_name",
+            score_key="confidence",
+        )
+        p = json.loads(part.read_text(encoding="utf-8"))
+        for f in p.get("features", []):
+            f.setdefault("properties", {})["region_name"] = name
+        pred_features += p.get("features", [])
+
         d = json.loads(
             (cfg.data.sites_dir / name / cfg.data.labels_file).read_text(encoding="utf-8")
         )
@@ -62,7 +83,10 @@ def score(ckpt: Path, run: Path, sites: list[str] | None = None) -> float:
             f.setdefault("properties", {})["region_name"] = name
             feats.append(f)
 
-    write_detections(tmp / "p.geojson", dets, cfg.data.labels_crs, "EPSG:3857")
+    (tmp / "p.geojson").write_text(
+        json.dumps({"type": "FeatureCollection", "features": pred_features}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (tmp / "g.geojson").write_text(
         json.dumps({"type": "FeatureCollection", "features": feats}, ensure_ascii=False),
         encoding="utf-8",

@@ -114,8 +114,10 @@ def _trim_to_limit(out: Path) -> None:
     fc["features"] = feats
     text = json.dumps(fc, ensure_ascii=False)
     while len(text.encode("utf-8")) > _MAX_BYTES and feats:
-        # Крупные полигоны весят больше всего: режем самые многословные.
-        feats.sort(key=lambda f: len(json.dumps(f["geometry"])), reverse=True)
+        # Режем самые низкоуверенные: крупные полигоны — это часто городища
+        # и фортификации (самые дорогие классы), выбрасывать их первым
+        # делом нельзя, даже если они многословны.
+        feats.sort(key=lambda f: float(f["properties"].get("confidence") or 0.0), reverse=True)
         feats = feats[: int(len(feats) * 0.9)]
         fc["features"] = feats
         text = json.dumps(fc, ensure_ascii=False)
@@ -184,10 +186,12 @@ def run(
         }
     classes = cfg.targets.classes
     bs = batch_size or cfg.train.batch_size
+    n_det = 0
+    # Временные файлы — рядом с выходом: на платформе это может быть
+    # единственная записываемая локация, /tmp бывает read-only.
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    n_det = 0
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(prefix=".koz3_parts_", dir=out.parent) as tmp:
         parts: list[Path] = []
         for i, site_dir in enumerate(sites):
             name = site_dir.name

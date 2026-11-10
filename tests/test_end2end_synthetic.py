@@ -67,6 +67,12 @@ def test_end2end_synthetic(tmp_path):
             tiles_per_epoch=E2E_TILES_PER_EPOCH,
             num_workers=0,
             device="cpu",
+            # Отбор best с 1-й эпохи: при дефолтном min_epoch=20 короткий
+            # прогон никогда не сохранит best.pt по ключу, и fallback
+            # запишет туда последнюю эпоху, а не argmax val_f1 — тогда
+            # сверка инференса с логом обучения теряет смысл.
+            min_epoch=1,
+            min_delta=0.0,
             train_sites=("site_1",),
             val_sites=("site_2",),
         ),

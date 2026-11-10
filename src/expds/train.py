@@ -216,7 +216,7 @@ def fit(
     model = (model or build_model(cfg.model, len(channels), len(classes), pretrained=True)).to(
         device
     )
-    loss_fn = KozLoss(len(classes), cfg.loss)
+    loss_fn = KozLoss(len(classes), cfg.loss, classes=classes)
     ds = KozDataset(train_sites, cfg.tiles.tile_px, cfg.tiles.overlap_px)
     weights = torch.as_tensor(
         np.asarray(ds.sample_weights(cfg.tiles.pos_fraction), dtype=np.float64)
@@ -234,7 +234,11 @@ def fit(
         sampler=sampler,
         num_workers=tc.num_workers,
         pin_memory=device.type == "cuda",
-        persistent_workers=tc.num_workers > 0,
+        # persistent_workers держит воркеры с копией датасета первой эпохи:
+        # set_epoch до них не доходит, и аугментации замирают на зерне первой
+        # эпохи (проверено: паттерн флипов идентичен в эпохах 1..N). Перезапуск
+        # воркеров дешевле замороженных аугментаций.
+        persistent_workers=False,
     )
     opt = AdamW(model.parameters(), lr=tc.lr, weight_decay=tc.weight_decay)
     sched = CosineAnnealingLR(opt, T_max=tc.epochs)

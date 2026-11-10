@@ -26,6 +26,7 @@ from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
+from expds.data.build_raster import grid_from_geo_sources
 from expds.data.raster import write_raster
 from expds.features.grid import Grid, Layer
 
@@ -84,39 +85,37 @@ def _grid_from_dtm(site_dir: Path) -> Grid | None:
 
 
 def _grid_from_gpr(site_dir: Path) -> Grid:
-    """Запасной путь: сетка по bbox первого GPR-растра, приведённая к 1 м UTM."""
+    """Запасной путь: общая сетка по всем гео-источникам (07_/08_/09_).
+
+    Родное разрешение/CRS первого растра нельзя: у gpr и mag они разные,
+    и каналы оказываются на несовместимых Grid. grid_from_geo_sources даёт
+    одинаковую UTM-сетку для обоих сборщиков и защищает от OOM (карта
+    0.05 м/px на пару километров иначе разворачивается в десятки ГБ).
+    """
     tifs = _gpr_sources(site_dir)
     if not tifs:
-        raise FileNotFoundError(f"{site_dir}: нет GPR-растров (07_/08_/09_)")
-    with rasterio.open(tifs[0]) as src:
-        bounds = src.bounds
-        crs = src.crs
-        # Если CRS не UTM-метры, всё равно берём как есть: build_site_rasters
-        # уже умеет приводить к UTM через grid_from_sources, но здесь
-        # контракт — сетка dtm. Для участков без dtm оставляем родной CRS.
-        return Grid(
-            crs=str(crs) if crs else "EPSG:3857",
-            pixel_size=float(abs(src.res[0])),
-            x_min=float(bounds.left),
-            y_min=float(bounds.bottom),
-            width=int(src.width),
-            height=int(src.height),
-        )
+        raise FileNotFoundError(f"{site_dir}: нет GPR-растров (08_/09_) или магнитки (07_)")
+    return grid_from_geo_sources(site_dir)
 
 
 def _depth_from_name(path: Path) -> float | None:
     """Глубина из имени: ..._карта_03_1.0.tif -> 1.0, gpr_1.5m -> 1.5, slice_150cm -> 1.5.
 
     Глубиной считается только токен с явной глубиной: дробь (0.2) или
-    суффикс m/cm. Голое целое ("01") — порядковый номер файла.
+    суффикс m/cm (включая кириллические м/см и десятичную запятую:
+    "2,5м" -> 2.5). Голое целое ("01") — порядковый номер файла.
     Ищем с конца: глубина в именах стоит последней.
     """
-    stem = path.stem.lower().replace("-", "_")
+    stem = path.stem.lower().replace("-", "_").replace(",", ".")
     for token in reversed(stem.split("_")):
         token = token.strip()
-        if token.endswith("cm"):
+        if token.endswith(("см", "cm")):  # кириллица и латиница
             scale, num = 0.01, token[:-2]
-        elif token.endswith("m"):
+        elif token.endswith("мм") or token.endswith("mm"):
+            # Миллиметры в именах слайсов не встречаются; распознавать не
+            # берёмся, чтобы 150mm не превратился в 150 метров.
+            continue
+        elif token.endswith(("м", "m")):  # кириллица и латиница
             scale, num = 1.0, token[:-1]
         elif "." in token:
             scale, num = 1.0, token

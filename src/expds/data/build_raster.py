@@ -23,6 +23,7 @@ row 0 = юг — массив переворачивается сразу пос
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable
 from dataclasses import asdict
@@ -43,6 +44,7 @@ from expds.features.grid import Grid, Layer
 Say = Callable[[str], None]
 
 RGB_PREFIXES = ("03_", "04_", "05_")
+GEO_PREFIXES = ("07_", "08_", "09_")
 RGB_CHANNELS = ("rgb_r", "rgb_g", "rgb_b")
 PIXEL_SIZE = 1.0
 PAD_PX = 64
@@ -161,6 +163,100 @@ def _pixel_size(path: Path) -> float:
         return float(abs(ds.res[0]))
 
 
+def _metric_pixel_size(path: Path) -> float:
+    """Размер пикселя в МЕТРАХ на местности (для сортировки мозаики).
+
+    У источника в градусах (EPSG:4326) res ~1e-6, и в сортировке по
+    «сырому» res он всегда оказывается «самым мелким», перекрывая
+    по-настоящему детальные UTM-источники. Для градусных CRS умножаем
+    на длину градуса долготы на широте центра.
+    """
+    with rasterio.open(path) as ds:
+        res = float(abs(ds.res[0]))
+        if ds.crs is None or not ds.crs.is_geographic:
+            return res
+        b = ds.bounds
+        lat = 0.5 * (b.bottom + b.top)
+        return res * 111_320.0 * math.cos(math.radians(lat))
+
+
+def _geo_tif_sources(site_dir: Path) -> list[Path]:
+    """Все растровые геофизические источники участка (07_/08_/09_)."""
+    tifs: list[Path] = []
+    for sub in sorted(Path(site_dir).iterdir()):
+        if sub.is_dir() and sub.name[:3] in GEO_PREFIXES:
+            tifs.extend(sorted(sub.glob("*.tif")))
+    return tifs
+
+
+def grid_from_geo_sources(
+    site_dir: Path,
+    pixel_size: float = PIXEL_SIZE,
+    pad_px: int = PAD_PX,
+    max_pixels: int = 12_000_000,
+) -> Grid:
+    """Единая сетка по объединению bbox ВСЕХ геофизических источников.
+
+    mag и gpr строят каналы независимо; если каждый выведет свою сетку
+    (родное разрешение/CRS первого попавшегося растра), mag_* и
+    gpr_slice_* лягут на разные Grid и stack_layers упадёт или тихо
+    ресемплирует. Здесь один набор источников -> одна сетка для всех
+    гео-каналов: UTM по центроиду, пиксель — самый мелкий из источников
+    в метрах, а при риске OOM (max_pixels) он укрупняется кратно.
+    """
+    tifs = _geo_tif_sources(site_dir)
+    if not tifs:
+        raise FileNotFoundError(f"{site_dir}: нет 07_/08_/09_ для построения сетки")
+
+    utm_bounds: list[tuple[float, float, float, float]] = []
+    metric_px: list[float] = []
+    for tif in tifs:
+        with rasterio.open(tif) as ds:
+            if ds.crs is None:
+                continue
+            b = ds.bounds
+            wgs = transform_bounds(ds.crs, "EPSG:4326", *b, densify_pts=21)
+            utm_bounds.append(wgs)  # зону выберем после, по общему центроиду
+            metric_px.append(_metric_pixel_size(tif))
+    if not utm_bounds:
+        raise ValueError(f"{site_dir}: у геофизических растров нет CRS")
+
+    lon = sum(w[0] + w[2] for w in utm_bounds) / (2 * len(utm_bounds))
+    lat = sum(w[1] + w[3] for w in utm_bounds) / (2 * len(utm_bounds))
+    crs_out = utm_epsg(lon, lat)
+    utm = [transform_bounds("EPSG:4326", crs_out, *w, densify_pts=21) for w in utm_bounds]
+    xs = [v for u in utm for v in (u[0], u[2])]
+    ys = [v for u in utm for v in (u[1], u[3])]
+
+    ps = min(metric_px) if metric_px else pixel_size
+    ps = max(ps, 1e-6)
+    pad = pad_px * ps
+    x0 = math.floor((min(xs) - pad) / ps) * ps
+    y0 = math.floor((min(ys) - pad) / ps) * ps
+    x1 = math.ceil((max(xs) + pad) / ps) * ps
+    y1 = math.ceil((max(ys) + pad) / ps) * ps
+    width = int(round((x1 - x0) / ps))
+    height = int(round((y1 - y0) / ps))
+
+    # Предохранитель от OOM: карта 0.05 м/px на пару км — десятки ГБ.
+    n_px = width * height
+    if n_px > max_pixels:
+        scale = math.ceil(math.sqrt(n_px / max_pixels))
+        ps *= scale
+        width = int(math.ceil((x1 - x0) / ps))
+        height = int(math.ceil((y1 - y0) / ps))
+        x0, y0 = x1 - width * ps, y1 - height * ps
+
+    return Grid(
+        crs=crs_out,
+        pixel_size=float(ps),
+        x_min=float(x0),
+        y_min=float(y0),
+        width=int(width),
+        height=int(height),
+    )
+
+
 def _grid_from_tif(path: Path) -> Grid:
     """Сетка GeoTIFF по метаданным, без чтения пикселей."""
     with rasterio.open(path) as ds:
@@ -258,7 +354,7 @@ def composite_rgb(
             ["нет 03_/04_/05_"],
         )
 
-    tifs.sort(key=_pixel_size, reverse=True)
+    tifs.sort(key=_metric_pixel_size, reverse=True)
     out = np.full((3, grid.height, grid.width), NODATA, np.float32)
     covered = np.zeros(grid.shape, dtype=bool)
     notes: list[str] = []

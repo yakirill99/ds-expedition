@@ -81,7 +81,7 @@ _CHANNEL_ORDER_CLOUD_PREFIXES = (
     "z_std",
 )
 _CHANNEL_ORDER_OPTIC_PREFIXES = ("rgb_",)
-_CHANNEL_ORDER_GEO_PREFIXES = ("gpr_slice_", "mag_")
+_CHANNEL_ORDER_GEO_PREFIXES = ("gpr_slice_", "mag_", "mag")
 
 
 class RawSiteUnsupportedError(RuntimeError):
@@ -614,8 +614,11 @@ def resolve_sites(
     prof = profiler if profiler is not None else Profiler()
 
     if site_kind(data) == "built":
-        # У регионов La+SpOr / La+Ae рельеф собран, а rgb_* может не быть.
+        # У регионов La+SpOr / La+Ae рельеф собран, а rgb_*/geo-каналы могут
+        # не быть: сборщики идемпотентны, готовое не трогают.
         _build_rgb(data, labels_crs, max_pixels, prof)
+        _build_gpr(data, prof)
+        _build_mag(data, prof)
         return [data]
 
     if not data.is_dir():

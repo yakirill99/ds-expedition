@@ -1,4 +1,15 @@
 FROM yakirill99/ds-expedition:latest
+WORKDIR /app
 COPY src/expds /app/expds
 COPY dockerctx/config.yaml /app/config.yaml
 COPY dockerctx/weights.pt /app/weights.pt
+
+# Сверка конфига и весов на этапе сборки образа: рассинхрон channels/classes
+# иначе роняет инференс уже на платформе (код != 0, файла нет — попытка
+# сгорела). Упавший RUN валит сборку, и плохой образ просто не соберётся.
+RUN python -c " \
+    from expds.pipeline_config import load_pipeline_config; \
+    from expds.models.checkpoint import load_checkpoint; \
+    c = load_pipeline_config('/app/config.yaml'); \
+    load_checkpoint('/app/weights.pt', channel_names=c.data.channels, classes=c.targets.classes); \
+    print('config <-> weights: OK,', len(c.data.channels), 'каналов,', len(c.targets.classes), 'классов')"

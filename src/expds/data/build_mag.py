@@ -26,6 +26,7 @@ from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.windows import Window
 
+from expds.data.build_raster import grid_from_geo_sources
 from expds.data.raster import write_raster
 from expds.features.grid import Grid, Layer
 
@@ -33,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 MAG_PREFIXES = ("07_",)  # MagGr; EtGr/TerFl — не магнитометрия
 MAG_CHANNEL_PREFIX = "mag_"
+# Канонический канал магнитки: configs/night*.yaml и make_synthetic ждут
+# слой ровно с именем mag. mag_<field> остаются как расширенные каналы.
+MAG_CHANNEL = "mag"
 NODATA = -9999.0
 READ_STEP_ROWS = 256
 META_PATH = Path("samples") / "sample_meta.json"
@@ -81,19 +85,13 @@ def _grid_from_dtm(site_dir: Path) -> Grid | None:
 
 
 def _grid_from_mag(site_dir: Path) -> Grid:
-    """Запасной путь: сетка по bbox первого магнитного растра."""
-    tifs = _mag_sources(site_dir)
-    if not tifs:
-        raise FileNotFoundError(f"{site_dir}: нет магнитных растров (07_*)")
-    with rasterio.open(tifs[0]) as src:
-        return Grid(
-            crs=str(src.crs) if src.crs else "EPSG:3857",
-            pixel_size=float(abs(src.res[0])),
-            x_min=float(src.bounds.left),
-            y_min=float(src.bounds.bottom),
-            width=int(src.width),
-            height=int(src.height),
-        )
+    """Запасной путь: общая сетка по всем гео-источникам (07_/08_/09_).
+
+    Родное разрешение/CRS первого растра здесь нельзя: у mag и gpr они
+    разные, и каналы оказываются на несовместимых Grid. grid_from_geo_sources
+    даёт одинаковую UTM-сетку для обоих сборщиков и защищает от OOM.
+    """
+    return grid_from_geo_sources(site_dir)
 
 
 def _field_from_name(path: Path) -> str:
@@ -158,6 +156,7 @@ def build_mag_layers(
 
     grid = grid or _grid_from_dtm(site_dir) or _grid_from_mag(site_dir)
     written: dict[str, Path] = {}
+    canonical: tuple[np.ndarray, Grid] | None = None
 
     for idx, path in enumerate(sources):
         field = _field_from_name(path)
@@ -169,6 +168,8 @@ def build_mag_layers(
         if not cover.any():
             logger.warning("%s: магнитный растр не покрывает сетку участка", path.name)
             continue
+        if canonical is None:
+            canonical = (data, grid)
 
         layer = Layer(
             name=name,
@@ -188,5 +189,22 @@ def build_mag_layers(
             field,
             cover.mean() * 100,
         )
+
+    # Канонический канал mag: без него конфиги с каналом "mag" видят на
+    # реальных участках нули и channel_mask=False (сборщик пишет mag_<field>,
+    # а контракт модели — ровно mag).
+    if canonical is not None:
+        data, grid_c = canonical
+        layer = Layer(
+            name=MAG_CHANNEL,
+            data=data.astype(np.float32),
+            grid=grid_c,
+            nodata=NODATA,
+            source=str(sources[0]),
+            unit="nT",
+        )
+        dst = out_dir / f"{MAG_CHANNEL}.tif"
+        write_raster(layer=layer, path=dst)
+        written[MAG_CHANNEL] = dst
 
     return written

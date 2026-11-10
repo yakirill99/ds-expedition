@@ -173,9 +173,20 @@ def build(
 
     metadata = {"image": image, "entry_point": entry_point}
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # ZipInfo с фиксированной датой и правами 0644: writestr(str, ...) ставит
+    # текущее время (md5 «идемпотентности» держится на одной минуте) и права
+    # 0600 — если платформа распаковывает и запускает под разными
+    # пользователями, 0600 даёт PermissionError.
+    def _zinfo(name: str) -> zipfile.ZipInfo:
+        zi = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+        zi.external_attr = 0o644 << 16
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        return zi
+
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("solution.py", new_src)
-        zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False))
+        zf.writestr(_zinfo("solution.py"), new_src)
+        zf.writestr(_zinfo("metadata.json"), json.dumps(metadata, ensure_ascii=False))
 
     print(f"готово: {out} ({out.stat().st_size} байт)")
     print(f"  image        {image}")

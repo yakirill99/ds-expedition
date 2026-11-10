@@ -46,6 +46,12 @@ _POS_HEATMAP_THRESHOLD = 0.5
 # заполнения на этапе build_site; после пересборки не срабатывает.
 _FILL_MAX_DIST_PX = 7.0
 
+# Каналы направления/фазы, которые нельзя растягивать per-site перцентилями:
+# aspect_sin/cos уже в [-1, 1], а совместная (не поканальная) нормировка
+# нужна ещё и аугментациям: rot90 перемешивает sin и cos между каналами,
+# и при независимой нормировке это даёт невалидные комбинации.
+_RAW_VALUE_CHANNELS = ("aspect_sin", "aspect_cos")
+
 
 @dataclass(frozen=True, eq=False)
 class SiteData:
@@ -165,7 +171,9 @@ _CLASS_SOURCE_PREFIXES: dict[str, tuple[str, ...]] = {
 # В data/rebuilt подпапок-источников нет, есть только layers/ и samples/,
 # поэтому источник определяем и по собранным каналам.
 _SOURCE_LAYER_PREFIXES: dict[str, tuple[str, ...]] = {
-    "07_": ("mag_",),
+    # Префикс "mag" покрывает и mag_tmi (build_mag_layers), и канонический
+    # канал mag (контракт configs/night*.yaml, make_synthetic).
+    "07_": ("mag",),
     "08_": ("gpr_slice_",),
     "09_": ("gpr_slice_",),
     "03_": ("rgb_",),
@@ -276,6 +284,10 @@ def load_site(
         if normalize == NORMALIZE_SITE_ROBUST and name in _RGB_GROUP:
             rgb_slots.append(len(layers))
             layers.append(layer)
+        elif normalize == NORMALIZE_SITE_ROBUST and name in _RAW_VALUE_CHANNELS:
+            # Уже ограничен [-1, 1]: перцентильная нормировка тут только
+            # усиливает шум и ломает смесь sin/cos в аугментациях.
+            layers.append(layer)
         else:
             layers.append(normalize_layer(layer) if normalize == NORMALIZE_SITE_ROBUST else layer)
 
@@ -361,14 +373,20 @@ class KozDataset(Dataset):
         )
 
     def _is_positive(self, site_idx: int, window: Window) -> bool:
-        """В окне есть пиксель маски или пик heatmap."""
+        """В окне есть пиксель маски или пик heatmap наблюдаемого класса.
+
+        Классы с y_valid = 0 (модальность не снималась) не делают тайл
+        позитивным: лосс их всё равно маскирует, а сэмплер зря гонял бы
+        такие тайлы вместо информативных.
+        """
         site = self._sites[site_idx]
         rows, cols = window.slices
         assert site.y_seg is not None and site.y_hm is not None
-        return bool(
-            site.y_seg[:, rows, cols].max() > 0
-            or site.y_hm[:, rows, cols].max() >= _POS_HEATMAP_THRESHOLD
-        )
+        y_seg, y_hm = site.y_seg[:, rows, cols], site.y_hm[:, rows, cols]
+        if site.y_valid is not None:
+            y_seg = y_seg * site.y_valid[:, None, None]
+            y_hm = y_hm * site.y_valid[:, None, None]
+        return bool(y_seg.max() > 0 or y_hm.max() >= _POS_HEATMAP_THRESHOLD)
 
     @property
     def sites(self) -> tuple[SiteData, ...]:

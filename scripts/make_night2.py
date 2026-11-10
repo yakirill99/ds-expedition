@@ -5,6 +5,7 @@
 
 from pathlib import Path
 
+import rasterio
 import yaml
 
 from expds.eval.metric import read_objects
@@ -37,9 +38,6 @@ for d in sorted(RAW.iterdir()):
         continue
     cand.append((n, d.name, base))
 
-# Память: тензор участка = 31 * H * W * 4 байт. Считаем по реальному размеру.
-import rasterio
-
 
 def mb(base: str) -> float:
     with rasterio.open(Path(base) / "layers" / "rgb_r.tif") as r:
@@ -51,7 +49,7 @@ print(f"кандидатов с RGB и GT: {len(cand)}")
 
 MAX_SITES, MAX_MB = 60, 120.0
 extra, skipped = [], []
-for n, name, base in cand:
+for _n, name, base in cand:
     m = mb(base)
     if m > MAX_MB:
         skipped.append((name, round(m)))

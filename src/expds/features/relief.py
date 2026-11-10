@@ -210,15 +210,25 @@ def _compute_openness_direction(
     cos_a = np.cos(azimuth_rad)
     sin_a = np.sin(azimuth_rad)
 
+    # Паддинг вместо np.roll: roll замыкает растр по кругу, и у северного
+    # края «соседи на север» читались бы с южного края — полоса шириной
+    # radius у каждой границы получала мусорные углы. edge-паддинг даёт ту
+    # же семантику «сосед за границей = ближайший краевой», что и у
+    # остальных производных (gaussian/uniform с mode="nearest").
+    padded = np.pad(dtm, radius, mode="edge")
+
     for step in range(1, radius + 1):
         dx = int(round(step * cos_a))
         dy = int(round(step * sin_a))
         if dx == 0 and dy == 0:
             continue
 
-        shifted = np.roll(np.roll(dtm, -dy, axis=0), -dx, axis=1)
+        # Сосед в направлении азимута: +col = восток (sin), +row = север (cos).
+        shifted = padded[radius + dy : radius + dy + height, radius + dx : radius + dx + width]
 
-        distance = step * pixel_size
+        # Фактическое смещение после округления шага: на диагонали
+        # sqrt(2)*step, а не step — иначе углы завышаются на ~41%.
+        distance = float(np.hypot(dx, dy)) * pixel_size
         dz = shifted - dtm
         angle = np.degrees(np.arctan2(dz, distance)).astype(np.float32)
 

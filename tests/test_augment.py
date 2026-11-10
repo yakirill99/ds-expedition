@@ -305,3 +305,94 @@ def test_warmup_hm_full_from_third_epoch():
 def test_warmup_hm_ramp_second_epoch():
     assert warmup_hm_weight(2, 1.0) == pytest.approx(0.5)
     assert warmup_hm_weight(2, 2.0) == pytest.approx(1.0)
+
+
+# ============================================================
+# Каналы направления при flip/rot90.
+# ============================================================
+
+_DIR_NAMES = (
+    "dtm",
+    "aspect_sin",
+    "aspect_cos",
+    "hillshade_az_45",
+    "hillshade_az_135",
+    "hillshade_az_225",
+    "hillshade_az_315",
+)
+
+
+def _dir_batch(t: int = 4) -> tuple[torch.Tensor, torch.Tensor]:
+    """Батч: сток на восток (sin=1, cos=0) и различимые hillshade-каналы."""
+    x = torch.zeros(1, len(_DIR_NAMES), t, t)
+    x[:, 1] = 1.0
+    x[:, 2] = 0.0
+    x[:, 3] = 1.0
+    x[:, 4] = 2.0
+    x[:, 5] = 3.0
+    x[:, 6] = 4.0
+    return x, torch.ones(1, t, t)
+
+
+def test_direction_channels_vflip() -> None:
+    """vflip (зеркало N-S): сток на восток не меняется, hillshade 45<->135, 225<->315."""
+    x, valid = _dir_batch()
+    out, _, _, _ = geometric(x, None, None, valid, vflip=True, channel_names=_DIR_NAMES)
+    assert torch.equal(out[:, 1], torch.ones(1, 4, 4))
+    assert torch.equal(out[:, 2], torch.zeros(1, 4, 4))
+    assert torch.equal(out[:, 3], torch.full((1, 4, 4), 2.0))
+    assert torch.equal(out[:, 4], torch.full((1, 4, 4), 1.0))
+    assert torch.equal(out[:, 5], torch.full((1, 4, 4), 4.0))
+    assert torch.equal(out[:, 6], torch.full((1, 4, 4), 3.0))
+
+
+def test_direction_channels_hflip() -> None:
+    """hflip (зеркало E-W): сток на запад (sin=-1), hillshade 45<->315, 135<->225."""
+    x, valid = _dir_batch()
+    out, _, _, _ = geometric(x, None, None, valid, hflip=True, channel_names=_DIR_NAMES)
+    assert torch.equal(out[:, 1], torch.full((1, 4, 4), -1.0))
+    assert torch.equal(out[:, 2], torch.zeros(1, 4, 4))
+    assert torch.equal(out[:, 3], torch.full((1, 4, 4), 4.0))
+    assert torch.equal(out[:, 4], torch.full((1, 4, 4), 3.0))
+    assert torch.equal(out[:, 5], torch.full((1, 4, 4), 2.0))
+    assert torch.equal(out[:, 6], torch.full((1, 4, 4), 1.0))
+
+
+def test_direction_channels_rot90() -> None:
+    """rot90 k=1 поворачивает сцену по часовой: восток -> юг, az +90; слот az берёт ch az-90."""
+    x, valid = _dir_batch()
+    out, _, _, _ = geometric(x, None, None, valid, rot90=1, channel_names=_DIR_NAMES)
+    assert torch.equal(out[:, 1], torch.zeros(1, 4, 4))
+    assert torch.equal(out[:, 2], torch.full((1, 4, 4), -1.0))
+    assert torch.equal(out[:, 3], torch.full((1, 4, 4), 4.0))
+    assert torch.equal(out[:, 4], torch.full((1, 4, 4), 1.0))
+    assert torch.equal(out[:, 5], torch.full((1, 4, 4), 2.0))
+    assert torch.equal(out[:, 6], torch.full((1, 4, 4), 3.0))
+
+
+def test_aspect_matches_recomputed_from_flipped_relief() -> None:
+    """Аспект после hflip равен аспекту, пересчитанному из перевёрнутого рельефа."""
+    from expds.features.relief import compute_slope_aspect
+
+    t = 16
+    ps = 1.0
+    col = np.arange(t, dtype=np.float64)
+    dtm = np.tile(col * 0.5, (t, 1)).astype(np.float32)  # z растёт на восток
+
+    _, aspect0 = compute_slope_aspect(dtm, ps)
+    x0 = torch.zeros(1, len(_DIR_NAMES), t, t)
+    x0[:, 0] = torch.from_numpy(dtm)
+    x0[:, 1] = torch.from_numpy(np.sin(aspect0 / 180.0 * np.pi).astype(np.float32))
+    x0[:, 2] = torch.from_numpy(np.cos(aspect0 / 180.0 * np.pi).astype(np.float32))
+
+    out, _, _, _ = geometric(
+        x0, None, None, torch.ones(1, t, t), hflip=True, channel_names=_DIR_NAMES
+    )
+
+    dtm_f = np.fliplr(dtm)
+    _, aspect1 = compute_slope_aspect(dtm_f, ps)
+    sin1 = torch.from_numpy(np.sin(aspect1 / 180.0 * np.pi).astype(np.float32))
+    cos1 = torch.from_numpy(np.cos(aspect1 / 180.0 * np.pi).astype(np.float32))
+
+    torch.testing.assert_close(out[:, 1], sin1.unsqueeze(0), rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(out[:, 2], cos1.unsqueeze(0), rtol=1e-4, atol=1e-5)

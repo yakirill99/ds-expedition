@@ -150,3 +150,16 @@ def test_regression_gpr_skips_profiles(tmp_path: Path) -> None:
     (et / "01_site_EtGr_карта_01_0.2.tif").write_bytes(b"")
     (et / "01_site_EtGr_профиль_01.tif").write_bytes(b"")
     assert [p.name for p in _gpr_sources(tmp_path)] == ["01_site_EtGr_карта_01_0.2.tif"]
+
+
+def test_depth_from_name_cyrillic_and_comma() -> None:
+    """Кириллические единицы и запятая: 2,5м -> 2.5, 150см -> 1.5; голые номера — нет."""
+    from expds.data.build_gpr import _depth_from_name
+
+    assert _depth_from_name(Path("01_region_карта_04_2,5м.tif")) == 2.5
+    assert _depth_from_name(Path("01_region_карта_04_2.5м.tif")) == 2.5
+    assert _depth_from_name(Path("карта_04_150см.tif")) == 1.5
+    assert _depth_from_name(Path("карта_04_1.5m.tif")) == 1.5
+    assert _depth_from_name(Path("01_region_карта_04_0.75.tif")) == 0.75
+    assert _depth_from_name(Path("01_region_карта_04.tif")) is None
+    assert _depth_from_name(Path("карта_04_150mm.tif")) is None
