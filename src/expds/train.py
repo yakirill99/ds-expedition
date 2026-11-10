@@ -28,6 +28,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from expds.eval.metric import (
+    ALL,
     EvalObject,
     MatchResult,
     evaluate,
@@ -67,6 +68,15 @@ class TrainConfig:
     val_sites: tuple[str, ...] = ()
     runs_dir: str = "runs"
     augment: AugmentConfig = field(default_factory=AugmentConfig)
+    # Fail-fast гейт: oracle f1 ниже порога -> пайплайн теряет эталон до модели,
+    # обучение бессмысленно (n3_long: 3 часа при потолке f1 0.386).
+    # 0 отключает гейт (тогда остаётся предупреждение при oracle < 0.95).
+    oracle_gate: float = 0.0
+    # Early stopping по val-ключу чекпойнта: столько эпох без улучшения
+    # key > best + min_delta tolerated после min_epoch. 0 отключает.
+    patience: int = 0
+    # Ключ отбора чекпойнта: f1 | f2 (recall-смещённый) | recall.
+    checkpoint_key: str = "f1"
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> TrainConfig:
@@ -87,6 +97,12 @@ class TrainConfig:
             raise ValueError("train: epochs и batch_size должны быть >= 1")
         if set(cfg.train_sites) & set(cfg.val_sites):
             raise ValueError("train: участки train и val пересекаются")
+        if not 0.0 <= cfg.oracle_gate <= 1.0:
+            raise ValueError("train.oracle_gate должен быть в [0, 1]")
+        if cfg.patience < 0:
+            raise ValueError("train.patience должен быть >= 0")
+        if cfg.checkpoint_key not in ("f1", "f2", "recall"):
+            raise ValueError("train.checkpoint_key должен быть f1 | f2 | recall")
         return cfg
 
 
@@ -120,14 +136,28 @@ def _score(
     eval_crs: str,
     tmp_dir: Path,
     total: MatchResult,
+    per_cls: dict[str, MatchResult] | None = None,
 ) -> None:
-    """Вероятности участка -> детекции -> метрика; счётчики добавляются в total."""
+    """Вероятности участка -> детекции -> метрика; счётчики добавляются в total.
+
+    per_cls: если передан, туда же складываются счётчики по классам
+    (динамика по типам объектов в логе, а не только сводная f1).
+    """
     dets = detect(probs, site, cfg.targets.classes, cfg.post)
     preds = _to_eval_objects(dets, site.grid.crs, eval_crs, tmp_dir)
-    r = evaluate(preds, list(gts), cfg.eval)["__all__"]
+    res = evaluate(preds, list(gts), cfg.eval)
+    r = res["__all__"]
     total.tp += r.tp
     total.fp += r.fp
     total.fn += r.fn
+    if per_cls is not None:
+        for cls, rc in res.items():
+            if cls == ALL:
+                continue
+            acc = per_cls.setdefault(cls, MatchResult())
+            acc.tp += rc.tp
+            acc.fp += rc.fp
+            acc.fn += rc.fn
 
 
 def _oracle(
@@ -135,13 +165,14 @@ def _oracle(
     cfg: PipelineConfig,
     eval_crs: str,
     tmp_dir: Path,
+    per_cls: dict[str, MatchResult] | None = None,
 ) -> MatchResult:
     """Таргеты (y_seg, y_hm) как идеальные вероятности через post + метрику."""
     total = MatchResult()
     for site, gts in val_sets:
         if site.has_labels:
             probs = np.concatenate([site.y_seg, site.y_hm]).astype(np.float32)
-            _score(probs, site, gts, cfg, eval_crs, tmp_dir, total)
+            _score(probs, site, gts, cfg, eval_crs, tmp_dir, total, per_cls)
     return total
 
 
@@ -152,6 +183,7 @@ def _validate(
     device: torch.device,
     eval_crs: str,
     tmp_dir: Path,
+    per_cls: dict[str, MatchResult] | None = None,
 ) -> MatchResult:
     total = MatchResult()
     classes = cfg.targets.classes
@@ -167,8 +199,26 @@ def _validate(
             cfg.train.batch_size,
             cfg.train.amp,
         )
-        _score(probs, site, gts, cfg, eval_crs, tmp_dir, total)
+        _score(probs, site, gts, cfg, eval_crs, tmp_dir, total, per_cls)
     return total
+
+
+def _checkpoint_value(res: MatchResult, key: str) -> float:
+    """Значение для отбора чекпойнта: f1 | f2 (вес recall 2:1) | recall.
+
+    F2 полезен, когда целевая метрика recall-доминированная: пропущенный
+    объект дороже ложного (у платформы fp считается с весом 0.5).
+    """
+    if key == "recall":
+        return res.recall
+    if key == "f2":
+        return _safe_ratio_fbeta(res.tp, res.fp, res.fn, beta=2.0)
+    return res.f1
+
+
+def _safe_ratio_fbeta(tp: int, fp: int, fn: int, beta: float) -> float:
+    den = (1 + beta * beta) * tp + beta * beta * fn + fp
+    return (1 + beta * beta) * tp / den if den > 0 else 1.0
 
 
 def _fmt(rec: Mapping[str, Any]) -> str:
@@ -254,12 +304,36 @@ def fit(
     with tempfile.TemporaryDirectory() as tmp:
         oracle = None
         if val_sets:
-            oracle = _oracle(val_sets, cfg, eval_crs, Path(tmp)).to_dict()
+            oracle_per_cls: dict[str, MatchResult] = {}
+            oracle = _oracle(val_sets, cfg, eval_crs, Path(tmp), oracle_per_cls).to_dict()
             print(
                 f"oracle val f1 {oracle['f1']:.3f} p {oracle['precision']:.3f} "
                 f"r {oracle['recall']:.3f} (tp {oracle['tp']} fp {oracle['fp']} fn {oracle['fn']})",
                 flush=True,
             )
+            for cls, r in sorted(oracle_per_cls.items()):
+                if r.tp + r.fp + r.fn:
+                    print(
+                        f"oracle по классам: {cls} f1 {r.f1:.3f} p {r.precision:.3f} "
+                        f"r {r.recall:.3f} (tp {r.tp} fp {r.fp} fn {r.fn})",
+                        flush=True,
+                    )
+            oracle_f1 = float(oracle["f1"])
+            if tc.oracle_gate > 0 and oracle_f1 < tc.oracle_gate:
+                raise RuntimeError(
+                    f"oracle gate: f1 {oracle_f1:.3f} < порога {tc.oracle_gate:.2f} — "
+                    f"пайплайн теряет эталон до модели (tp {oracle['tp']} fp {oracle['fp']} "
+                    f"fn {oracle['fn']}). Обучение даст ложную метрику. Сначала прогоните "
+                    f"scripts/oracle_diag.py --config <конфиг> и почините post/данные."
+                )
+            if tc.oracle_gate <= 0 and oracle_f1 < 0.95:
+                print(
+                    f"ПРЕДУПРЕЖДЕНИЕ: oracle f1 {oracle_f1:.3f} < 0.95 — потолок метрики "
+                    f"занижен пайплайном (гейт отключён, train.oracle_gate).",
+                    flush=True,
+                )
+        best_epoch = 0
+        stopped_at: int | None = None
         for epoch in range(1, tc.epochs + 1):
             t0 = time.perf_counter()
             train_ds.set_epoch(epoch)
@@ -292,9 +366,14 @@ def fit(
             rec: dict[str, Any] = {"epoch": epoch, "lr": opt.param_groups[0]["lr"]}
             rec.update({f"train_{k}": v / max(nb, 1) for k, v in sums.items()})
             if val_sets:
-                res = _validate(model, val_sets, cfg, device, eval_crs, Path(tmp))
+                val_per_cls: dict[str, MatchResult] = {}
+                res = _validate(model, val_sets, cfg, device, eval_crs, Path(tmp), val_per_cls)
                 rec.update({f"val_{k}": v for k, v in res.to_dict().items()})
-                key = res.f1
+                # Динамика по типам объектов: только классы с ненулевым сигналом.
+                for cls, r in sorted(val_per_cls.items()):
+                    if r.tp + r.fp + r.fn:
+                        rec[f"val_cls_{cls}"] = r.to_dict()
+                key = _checkpoint_value(res, tc.checkpoint_key)
             else:
                 key = -rec["train_loss"]
             rec["time_s"] = time.perf_counter() - t0
@@ -309,17 +388,39 @@ def fit(
             # модель (Dice 0.12 против 0.85). Отбор начинается после min_epoch.
             if epoch >= tc.min_epoch and key > best_key + tc.min_delta:
                 best_key = key
+                best_epoch = epoch
                 save_checkpoint(run_dir / "best.pt", model, cfg.model, channels, classes, extra)
             if epoch % 10 == 0:
                 save_checkpoint(
                     run_dir / f"ep{epoch:03d}.pt", model, cfg.model, channels, classes, extra
                 )
+            # Early stopping: после min_epoch ждём patience эпох без улучшения
+            # ключа отбора. n3_long: остановился бы на эпохе 18 вместо 180.
+            if (
+                tc.patience > 0
+                and val_sets
+                and epoch >= tc.min_epoch
+                and epoch - best_epoch >= tc.patience
+            ):
+                stopped_at = epoch
+                print(
+                    f"early stopping: {tc.patience} эпох без улучшения "
+                    f"{tc.checkpoint_key} (best ep {best_epoch}, key {best_key:.4f})",
+                    flush=True,
+                )
+                break
         if val_sets and not (run_dir / "best.pt").exists():
             # min_epoch может оказаться больше epochs — тогда отбор не
             # срабатывает ни разу, а predict ждёт best.pt.
             save_checkpoint(run_dir / "best.pt", model, cfg.model, channels, classes, extra)
         save_checkpoint(run_dir / "last.pt", model, cfg.model, channels, classes, extra)
-    return {"best": best_key, "history": history, "oracle": oracle}
+    return {
+        "best": best_key,
+        "best_epoch": best_epoch,
+        "stopped_at": stopped_at,
+        "history": history,
+        "oracle": oracle,
+    }
 
 
 def _git_rev() -> str | None:
@@ -368,6 +469,14 @@ def train_from_config(
         "cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "n_train_sites": len(train_sites),
         "n_val_sites": len(val_sets),
+        # Фингерпринт val-сплита: смена выборки без фиксации ломает
+        # сравнимость прогонов (n3_long: 437 -> 1518 объектов молча).
+        "val_split": [
+            {"name": name, "objects": len(gts)}
+            for name, (_, gts) in zip(tc.val_sites, val_sets, strict=True)
+        ],
+        "val_objects_total": sum(len(gts) for _, gts in val_sets),
+        "train_sites": list(tc.train_sites),
         "config": asdict(cfg),
     }
     (run_dir / "run.json").write_text(

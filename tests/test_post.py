@@ -301,3 +301,128 @@ def test_regression_peak_split_matches_dense_argmin(seeds):
         distances = ((points[:, None, :] - np.asarray(seeds)[None, :, :]) ** 2).sum(2)
         expected[rr, cc] = distances.argmin(1) + 1
     np.testing.assert_array_equal(actual, expected)
+
+
+# --- регрессии деления слитых объектов (n3_long: oracle recall 0.244) ---------
+
+
+def _feat_poly(grid, ring_m):
+    """LabelFeature полигона: мир -> пиксели Grid (как read_labels)."""
+    from expds.io.geojson import LabelFeature
+
+    ring = np.asarray(ring_m, dtype=np.float64)
+    px = np.column_stack(
+        [(ring[:, 0] - grid.x_min) / grid.pixel_size - 0.5,
+         (ring[:, 1] - grid.y_min) / grid.pixel_size - 0.5]
+    )
+    return LabelFeature(cls="k", geom_type="Polygon", world=(ring,), pixel=(px,), properties={})
+
+
+def _targets(grid, feats, classes=("k",), sigma=3.0):
+    from expds.targets.rasterize import labels_to_targets
+
+    return labels_to_targets(feats, grid, list(classes), sigma)
+
+
+def _pixel_iou(mask_a, mask_b):
+    inter = int((mask_a & mask_b).sum())
+    union = int(mask_a.sum() + mask_b.sum() - inter)
+    return inter / union if union else 0.0
+
+
+def _rasterize_det(detection, grid, shape):
+    from expds.targets.rasterize import points_in_rings
+
+    ring = np.asarray(detection.geometry, dtype=np.float64)
+    col = (ring[:, 0] - grid.x_min) / grid.pixel_size - 0.5
+    row = (ring[:, 1] - grid.y_min) / grid.pixel_size - 0.5
+    c0, c1 = max(int(col.min()), 0), min(int(np.ceil(col.max())), shape[1] - 1)
+    r0, r1 = max(int(row.min()), 0), min(int(np.ceil(row.max())), shape[0] - 1)
+    mask = np.zeros(shape, dtype=bool)
+    cols, rows = np.meshgrid(np.arange(c0, c1 + 1, dtype=float), np.arange(r0, r1 + 1, dtype=float))
+    mask[r0 : r1 + 1, c0 : c1 + 1] = points_in_rings(cols, rows, (np.column_stack([col, row]),))
+    return mask
+
+
+def test_plateau_peak_is_single_object():
+    """Плато 2x2 на пике гауссианы (центроид между пикселями) — один объект.
+
+    Раньше hm >= maximum_filter(hm) оставлял все пиксели плато, Voronoi делил
+    один объект на сектора с IoU ~0.25, и детекция не проходила матчинг.
+    """
+    grid = _grid()
+    t = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+    r_m = 6 * PS
+    # центр между пикселями: (10.5, 10.5) в пикселях -> плато 2x2
+    cx, cy = X0 + 10.5 * PS, Y0 + 10.5 * PS
+    ring = np.column_stack([cx + r_m * np.cos(t), cy + r_m * np.sin(t)])
+    feat = _feat_poly(grid, ring)
+    y_seg, y_hm = _targets(grid, [feat])
+    hm = y_hm[0]
+    plateau = hm >= ndimage_maximum(hm)
+    assert int(plateau.sum()) >= 2  # плато действительно есть
+
+    cfg = PostConfig(min_area_px=1.0, hm_thr=0.15, peak_window_px=7)
+    dets = seg_to_polygons(y_seg[0], grid, "k", cfg, hm=hm)
+    assert len(dets) == 1
+    iou = _pixel_iou(_rasterize_det(dets[0], grid, y_seg[0].shape), y_seg[0] > 0)
+    assert iou > 0.8
+
+
+def ndimage_maximum(a):
+    from scipy import ndimage
+
+    return ndimage.maximum_filter(a, size=7, mode="constant", cval=0.0)
+
+
+def test_split_touching_different_radii():
+    """Два касающихся диска разных радиусов -> две детекции, обе с IoU >= 0.5."""
+    grid = _grid(h=96, w=96)
+    t = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+    r1_m, r2_m = 10 * PS, 6 * PS
+    c1 = np.array([X0 + 30 * PS, Y0 + 48 * PS])
+    c2 = np.array([X0 + (30 + 10 + 6 - 4) * PS, Y0 + 48 * PS])  # перекрытие 4 px
+    ring1 = np.column_stack([c1[0] + r1_m * np.cos(t), c1[1] + r1_m * np.sin(t)])
+    ring2 = np.column_stack([c2[0] + r2_m * np.cos(t), c2[1] + r2_m * np.sin(t)])
+    feats = [_feat_poly(grid, ring1), _feat_poly(grid, ring2)]
+    y_seg, y_hm = _targets(grid, feats)
+
+    cfg = PostConfig(split_touching=True, split_min_distance_px=4,
+                     min_area_px=1.0, hm_thr=0.15, peak_window_px=7)
+    dets = seg_to_polygons(y_seg[0], grid, "k", cfg, hm=y_hm[0])
+    assert len(dets) == 2
+    for feat in feats:
+        target, _ = _targets(grid, [feat])
+        best = max(_pixel_iou(_rasterize_det(d, grid, y_seg[0].shape), target[0] > 0) for d in dets)
+        assert best >= 0.5
+
+
+def test_tiny_component_does_not_disable_split():
+    """Мелкий одиночный компонент не отключает деление слитых (глобальный гейт).
+
+    Раньше watershed запускался по условию len(peaks) > n_components: пики
+    мелких объектов не проходили threshold_abs, и один мелкий компонент
+    выключал деление всех слитых.
+    """
+    grid = _grid(h=96, w=128)
+    t = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+    # слитая пара
+    r1_m = r2_m = 6 * PS
+    c1 = np.array([X0 + 30 * PS, Y0 + 48 * PS])
+    c2 = np.array([X0 + (30 + 8) * PS, Y0 + 48 * PS])  # перекрытие 4 px
+    pair = [
+        _feat_poly(grid, np.column_stack([c1[0] + r1_m * np.cos(t), c1[1] + r1_m * np.sin(t)])),
+        _feat_poly(grid, np.column_stack([c2[0] + r2_m * np.cos(t), c2[1] + r2_m * np.sin(t)])),
+    ]
+    # мелкий одиночный (r = 2 px < split_min_radius)
+    c3 = np.array([X0 + 90 * PS, Y0 + 48 * PS])
+    tiny = _feat_poly(
+        grid, np.column_stack([c3[0] + 2 * PS * np.cos(t), c3[1] + 2 * PS * np.sin(t)])
+    )
+    y_seg, y_hm = _targets(grid, pair + [tiny])
+
+    cfg = PostConfig(split_touching=True, split_min_distance_px=4,
+                     min_area_px=1.0, hm_thr=0.15, peak_window_px=7)
+    dets = seg_to_polygons(y_seg[0], grid, "k", cfg, hm=y_hm[0])
+    # пара делится на 2 + мелкий = 3 детекции
+    assert len(dets) == 3

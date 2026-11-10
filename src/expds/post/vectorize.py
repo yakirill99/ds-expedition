@@ -5,6 +5,10 @@ seg-голова: порог -> 8-связные компоненты -> кон�
 внутренние контуры (обходят низ значений — знак площади противоположен внешнему)
 попадают в Detection.holes. Кольца Detection — без замыкающей точки
 (контракт io.geojson): внешнее CCW, дыры CW.
+Слитые компоненты (касание/перекрытие курганов) делятся по пикам hm
+(_split_component): пики считают объекты, watershed по рельефу hm
+проводит границу по седлу между гауссианами; без split_touching —
+Voronoi по пикам (старое поведение).
 hm-голова: локальные максимумы -> субпиксельное уточнение (парабола по log) -> круг.
 Координаты по контракту Grid: row 0 = юг, центр пикселя x = x_min + (col + 0.5) * ps.
 
@@ -21,7 +25,6 @@ from typing import Any
 
 import numpy as np
 from scipy import ndimage
-from skimage.feature import peak_local_max
 from skimage.measure import find_contours
 from skimage.segmentation import watershed
 
@@ -59,6 +62,8 @@ class PostConfig:
         cfg = cls(**d)
         if not (0.0 < cfg.seg_thr < 1.0 and 0.0 < cfg.hm_thr < 1.0):
             raise ValueError("post: thresholds must be in (0, 1)")
+        if cfg.split_min_distance_px < 0:
+            raise ValueError("post.split_min_distance_px must be >= 0")
         if cfg.peak_window_px < 3 or cfg.peak_window_px % 2 == 0:
             raise ValueError("post.peak_window_px must be odd and >= 3")
         if cfg.point_vertices < 3:
@@ -175,9 +180,45 @@ def _split_by_peaks(comp: np.ndarray, hm_sub: np.ndarray, cfg: PostConfig) -> np
     даёт один компонент на 2-4 кургана. Разделение по пикам hm возвращает
     их число; без него IoU блоба с каждым объектом < 0.5 и все уходят в fn.
     """
+    ys, xs = _hm_peaks(comp, hm_sub, cfg)
+    return _voronoi_by_peaks(comp, ys, xs)
+
+
+def _hm_peaks(
+    comp: np.ndarray, hm_sub: np.ndarray, cfg: PostConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    """Координаты пиков hm внутри компонента: локальный максимум >= hm_thr.
+
+    Плато схлопывается в один пик: центр гауссианы часто попадает между
+    пикселями (центроид в (r+0.5, c+0.5)), тогда 2x2 пикселя имеют ровно
+    одинаковое значение 1.0, и `hm >= maximum_filter(hm)` оставляет ВСЕ
+    четыре. Без дедупликации Voronoi делит один объект на сектора
+    (IoU ~0.25, все в fn), а watershed получает ложные маркеры.
+    Представитель плато — максимум hm; при равенстве минимальный (row, col).
+    """
     mx = ndimage.maximum_filter(hm_sub, size=cfg.peak_window_px, mode="constant", cval=0.0)
     peaks = (hm_sub >= mx) & (hm_sub >= cfg.hm_thr) & comp
-    ys, xs = np.nonzero(peaks)
+    if not peaks.any():
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    lab, n = ndimage.label(peaks, structure=_EIGHT)
+    ys = np.empty(n, dtype=np.int64)
+    xs = np.empty(n, dtype=np.int64)
+    for i, sl in enumerate(ndimage.find_objects(lab), start=1):
+        sub = np.where(lab[sl] == i, hm_sub[sl], -1.0)
+        r, c = np.unravel_index(int(np.argmax(sub)), sub.shape)
+        ys[i - 1] = sl[0].start + r
+        xs[i - 1] = sl[1].start + c
+    return ys, xs
+
+
+def _voronoi_by_peaks(
+    comp: np.ndarray, ys: np.ndarray, xs: np.ndarray
+) -> np.ndarray:
+    """Каждый пиксель компонента — к ближайшему пику (1..N). Нулевой пиксель — 0.
+
+    При равных расстояниях побеждает минимальный исходный индекс пика
+    (семантика np.argmin, закреплена регрессионным тестом).
+    """
     out = np.zeros(comp.shape, dtype=np.int32)
     if len(ys) < 2:
         out[comp] = 1
@@ -217,6 +258,83 @@ def _split_by_peaks(comp: np.ndarray, hm_sub: np.ndarray, cfg: PostConfig) -> np
     return out
 
 
+def _seed_markers(
+    shape: tuple[int, int],
+    ys: np.ndarray,
+    xs: np.ndarray,
+    hm_sub: np.ndarray,
+    min_distance: int,
+) -> np.ndarray:
+    """Маркеры watershed из пиков; близкие пики схлопываются в сильнейший.
+
+    Без слияния шумная hm модели даёт два маркера в паре пикселей —
+    один объект разваливается на части. Порог — split_min_distance_px.
+    """
+    order = np.argsort(-hm_sub[ys, xs], kind="stable")
+    markers = np.zeros(shape, dtype=np.int32)
+    kept: list[tuple[int, int]] = []
+    for idx in order:
+        r, c = int(ys[idx]), int(xs[idx])
+        if min_distance > 0 and any(
+            (r - kr) ** 2 + (c - kc) ** 2 < min_distance * min_distance for kr, kc in kept
+        ):
+            continue
+        kept.append((r, c))
+        markers[r, c] = len(kept)
+    return markers
+
+
+def _watershed_parts(
+    comp: np.ndarray,
+    hm_sub: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    cfg: PostConfig,
+) -> np.ndarray | None:
+    """Делит компонент watershed по рельефу heatmap (седло между объектами).
+
+    Маркеры — пики hm (см. _hm_peaks и _seed_markers), террейн — -hm:
+    граница проходит по седлу между гауссианами (для равных сигм —
+    биссектор между центрами, что и есть граница касания курганов).
+
+    Раньше деление шло по distance transform и запускалось по глобальному
+    условию len(peaks) > n_components: пики мелких объектов не проходили
+    порог threshold_abs = min_distance/2, и ОДИН мелкий компонент отключал
+    деление всех слитых (на rebuilt-данных 78 < 87 — watershed молча
+    не запускался ни разу), а для кругов разных радиусов резал вглубь
+    малого (IoU 0.46). hm-рельеф лишён обеих проблем.
+    """
+    markers = _seed_markers(comp.shape, ys, xs, hm_sub, cfg.split_min_distance_px)
+    if int(markers.max()) < 2:
+        return None
+    ws = watershed(-hm_sub.astype(np.float64), markers, mask=comp).astype(np.int32)
+    return ws if int(ws.max()) >= 2 else None
+
+
+def _split_component(comp: np.ndarray, hm_sub: np.ndarray, cfg: PostConfig) -> np.ndarray:
+    """Деление слитого компонента на объекты.
+
+    Слой 1: пики hm считают объекты; <= 1 пика — компонент целиком.
+    Слой 2 (split_touching): watershed по рельефу hm, маркеры — пики;
+    каждый бассейн = один объект.
+    Без split_touching — Voronoi по пикам (старое поведение).
+
+    Returns:
+        (h, w) int32: 0 вне компонента, 1..N — части.
+    """
+    ys, xs = _hm_peaks(comp, hm_sub, cfg)
+    out = np.zeros(comp.shape, dtype=np.int32)
+    if len(ys) < 2:
+        out[comp] = 1
+        return out
+    if not cfg.split_touching:
+        return _voronoi_by_peaks(comp, ys, xs)
+    ws = _watershed_parts(comp, hm_sub, ys, xs, cfg)
+    if ws is None:
+        return _voronoi_by_peaks(comp, ys, xs)
+    return ws
+
+
 # --- seg-голова ----------------------------------------------------------------
 
 
@@ -229,8 +347,9 @@ def seg_to_polygons(
 ) -> list[Detection]:
     """(H, W) вероятность и heatmap одного класса -> полигоны компонент.
 
-    Компонент, внутри которого больше одного пика hm, делится по ближайшему
-    пику: растеризация y_seg склеивает соприкасающиеся полигоны, без деления
+    Компонент, внутри которого больше одного пика hm, делится на объекты
+    (_split_component): watershed по перешейкам + Voronoi по пикам.
+    Растеризация y_seg склеивает соприкасающиеся полигоны, без деления
     каждый блоб даёт один fp и N fn.
     """
     h, w = prob.shape
@@ -238,24 +357,6 @@ def seg_to_polygons(
         hm = np.zeros((h, w), dtype=prob.dtype)
     binary = prob >= cfg.seg_thr
     lab, n = ndimage.label(binary, structure=_EIGHT)
-    if cfg.split_touching and n:
-        # Касающиеся объекты дают одну компоненту, а метрика требует один
-        # prediction на один GT: склейка N объектов = 1 TP и N-1 FN.
-        # Watershed по расстоянию до границы режет блоб в седловинах,
-        # то есть между центрами соседних курганов.
-        dist = ndimage.distance_transform_edt(binary)
-        peaks = peak_local_max(
-            dist,
-            min_distance=cfg.split_min_distance_px,
-            threshold_abs=cfg.split_min_distance_px / 2,
-            labels=lab,
-        )
-        if len(peaks) > n:
-            markers = np.zeros(lab.shape, dtype=np.int32)
-            for j, (r, c) in enumerate(peaks, start=1):
-                markers[r, c] = j
-            lab = watershed(-dist, markers, mask=binary).astype(np.int32)
-            n = int(lab.max())
     dets: list[Detection] = []
     for i, sl in enumerate(ndimage.find_objects(lab), start=1):
         if sl is None:
@@ -268,7 +369,7 @@ def seg_to_polygons(
         full = prob[r0:r1, c0:c1].astype(np.float64)
         lab_sub = lab[r0:r1, c0:c1]
         full[(lab_sub > 0) & (lab_sub != i)] = 0.0
-        parts = _split_by_peaks(lab_sub == i, hm[r0:r1, c0:c1], cfg)
+        parts = _split_component(lab_sub == i, hm[r0:r1, c0:c1], cfg)
         # Площади всех частей считаем одним проходом.
         # Маску создаём только для частей, прошедших порог площади.
         areas = np.bincount(parts.ravel())
@@ -372,7 +473,10 @@ def postprocess(
     for i, cls in enumerate(classes):
         branch = _branch_for(cls, cfg)
         if branch in (BRANCH_POLYGON, BRANCH_BOTH):
-            dets += seg_to_polygons(probs[i], grid, cls, cfg)
+            # hm обязателен для деления слитых компонент: без него
+            # соприкасающиеся полигоны дают один блоб = 1 TP и N-1 FN
+            # (n3_long: oracle recall 0.244 именно поэтому).
+            dets += seg_to_polygons(probs[i], grid, cls, cfg, hm=probs[k + i])
         if branch in (BRANCH_POINT, BRANCH_BOTH):
             dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
     return nms_centroids(dets, cfg.nms_radius_px * grid.pixel_size)[: cfg.max_detections]
