@@ -385,6 +385,13 @@ def stack_layers(
     for idx, name in enumerate(spec.channel_names):
         layer = layers_by_name.get(name)
         if layer is None:
+            # Сборщики кладут слой с уточнением поля: mag_tmi, mag_hg.
+            # В контракте канал один — `mag`; берём единственный совпавший.
+            cand = sorted(k for k in layers_by_name if k.startswith(f"{name}_"))
+            if len(cand) == 1:
+                logger.info("Канал '%s' взят из слоя '%s'", name, cand[0])
+                layer = layers_by_name[cand[0]]
+        if layer is None:
             logger.warning("Канал '%s' отсутствует, заполняем нулями (mask=False)", name)
             continue
 

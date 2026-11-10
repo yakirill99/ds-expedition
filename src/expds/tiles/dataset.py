@@ -277,7 +277,13 @@ def load_site(
     for name in channels:
         path = site_dir / _LAYERS_DIR / f"{name}.tif"
         if not path.exists():
-            continue
+            # Сборщики кладут слой с уточнением поля: mag -> mag_tmi.tif,
+            # mag -> mag_hg.tif. В контракте канал один, поэтому берём
+            # кандидата только если он единственный.
+            cand = sorted((site_dir / _LAYERS_DIR).glob(f"{name}_*.tif"))
+            if len(cand) != 1:
+                continue
+            path = cand[0]
         layer = read_raster(path, grid=grid)
         if name == _VALID_LAYER:
             layer = _fill_nodata(layer, _FILL_MAX_DIST_PX)

@@ -390,7 +390,7 @@ def fit(
                 best_key = key
                 best_epoch = epoch
                 save_checkpoint(run_dir / "best.pt", model, cfg.model, channels, classes, extra)
-            if epoch % 10 == 0:
+            if epoch % 5 == 0:
                 save_checkpoint(
                     run_dir / f"ep{epoch:03d}.pt", model, cfg.model, channels, classes, extra
                 )
