@@ -153,11 +153,16 @@ def oracle_report(
     obj_masks: list[np.ndarray | None] = []
     obj_mask_raw: list[np.ndarray | None] = []
     for f in feats_in:
-        y1, _ = labels_to_targets([f], grid, classes, sigma_px)
+        y1, y_hm1 = labels_to_targets([f], grid, classes, sigma_px)
+        ci = classes.index(f.cls)
         if f.geom_type == "Polygon":
-            raw = y1[0] > 0
+            raw = y1[ci] > 0
         else:
-            raw = y1[0] > 0.01  # гауссиана: пиксели со сколь-нибудь значимым сигналом
+            # Точка попадает только в heatmap-канал своего класса: в y_seg
+            # у неё пикселей нет (finds_points: 0 px / N hm). Раньше здесь
+            # читали y_seg[0] — каждая точка и каждый класс с индексом > 0
+            # получали пустую маску и падали в «вне сетки».
+            raw = y_hm1[ci] > 0.01  # гауссиана: пиксели со сколь-нибудь значимым сигналом
         om = raw & m if m is not None else raw
         obj_mask_raw.append(raw if raw.any() else None)
         obj_masks.append(om if om.any() else None)
@@ -187,17 +192,30 @@ def oracle_report(
     report.merged_components = sum(1 for v in comp_members.values() if len(v) > 1)
 
     # --- детекции: до NMS и после -------------------------------------------
-    dets: list = []
+    # Детекции оракула — ЩЕДРЫЙ потолок пайплайна: обе ветки для всех классов
+    # (идеальная модель умеет и сег-блоб, и пик). Прод-конфиг может резать
+    # ветки — это его право, но гейт должен мерить возможности post+матчинга.
+    # NMS раздельный: круги точек не давят друг друга радиусом полигонов.
+    dets_poly: list = []
+    dets_hm: list = []
     k = len(classes)
     for i, cls in enumerate(classes):
-        dets += seg_to_polygons(probs[i], grid, cls, post, hm=probs[k + i])
-        dets += heatmap_to_points(probs[k + i], grid, cls, post)
-    report.pre_nms_dets = len(dets)
-    dets_after = nms_centroids(dets, post.nms_radius_px * grid.pixel_size)
+        dets_poly += seg_to_polygons(probs[i], grid, cls, post, hm=probs[k + i])
+        dets_hm += heatmap_to_points(probs[k + i], grid, cls, post)
+    report.pre_nms_dets = len(dets_poly) + len(dets_hm)
+    point_r = (
+        post.point_nms_radius_px if post.point_nms_radius_px is not None else post.nms_radius_px
+    )
+    dets_after = nms_centroids(dets_poly, post.nms_radius_px * grid.pixel_size)
+    dets_after += nms_centroids(dets_hm, point_r * grid.pixel_size)
+    # Склейка веток BOTH — как в postprocess.
+    dets_after = nms_centroids(
+        dets_after, min(post.nms_radius_px, point_r) * grid.pixel_size
+    )
     report.post_nms_dets = len(dets_after)
     report.nms_suppressed = report.pre_nms_dets - report.post_nms_dets
     kept_ids = {id(d) for d in dets_after}
-    pre_by_id = {id(d): d for d in dets}
+    pre_by_id = {id(d): d for d in [*dets_poly, *dets_hm]}
 
     # --- матчинг -------------------------------------------------------------
     preds = objects_from_detections(dets_after)

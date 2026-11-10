@@ -68,6 +68,22 @@ def _valid_mask(site_dir: Path, grid: Grid):
     return valid
 
 
+def print_composition(feats) -> None:
+    """Состав разметки: полигоны/точки по классам — плотные точечные
+    кластеры и точки внутри полигональных классов сразу видны."""
+    from collections import Counter
+
+    comp: dict[str, Counter] = {}
+    for f in feats:
+        comp.setdefault(f.cls, Counter())[f.geom_type] += 1
+    parts = [
+        f"{cls}: Poly {c.get('Polygon', 0)} / Point {c.get('Point', 0)}"
+        for cls, c in sorted(comp.items())
+    ]
+    if parts:
+        print("  состав: " + "; ".join(parts))
+
+
 def diagnose_site(
     site_dir: Path,
     classes: list[str],
@@ -80,6 +96,7 @@ def diagnose_site(
     """Полный отчёт по одному участку."""
     grid = _site_grid(site_dir)
     feats = read_labels(site_dir / labels_file, grid, src_crs=labels_crs)
+    print_composition(feats)
     valid = _valid_mask(site_dir, grid)
     return oracle_report(feats, grid, classes, post, sigma_px, valid=valid, eval_cfg=eval_cfg)
 

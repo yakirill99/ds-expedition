@@ -51,6 +51,13 @@ class PostConfig:
     point_radius_px: float = 4.0
     point_vertices: int = 16
     nms_radius_px: float = 6.0
+    # Отдельные параметры heatmap-ветки (точки). None — наследовать общие:
+    # старые конфиги ведут себя ровно как раньше. Нужны, потому что общие
+    # значения настроены под ДЕЛЕНИЕ полигонов (peak_window 7, NMS 4-6 px),
+    # а плотные точечные кластеры (находки через 2-4 м) ими глотаются:
+    # синтетика 2026-11-11 — recall 0.636 на шаге 2-4 м.
+    point_nms_radius_px: float | None = None
+    point_peak_window_px: int | None = None
     max_detections: int = 2000
 
     @classmethod
@@ -66,6 +73,12 @@ class PostConfig:
             raise ValueError("post.split_min_distance_px must be >= 0")
         if cfg.peak_window_px < 3 or cfg.peak_window_px % 2 == 0:
             raise ValueError("post.peak_window_px must be odd and >= 3")
+        if cfg.point_peak_window_px is not None and (
+            cfg.point_peak_window_px < 3 or cfg.point_peak_window_px % 2 == 0
+        ):
+            raise ValueError("post.point_peak_window_px must be odd and >= 3")
+        if cfg.point_nms_radius_px is not None and cfg.point_nms_radius_px < 0:
+            raise ValueError("post.point_nms_radius_px must be >= 0")
         if cfg.point_vertices < 3:
             raise ValueError("post.point_vertices must be >= 3")
         if cfg.max_detections < 1:
@@ -409,7 +422,8 @@ def _refine(v_minus: float, v0: float, v_plus: float) -> float:
 def heatmap_to_points(hm: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> list[Detection]:
     """(H, W) heatmap одного класса -> круги радиуса point_radius_px вокруг пиков."""
     h, w = hm.shape
-    mx = ndimage.maximum_filter(hm, size=cfg.peak_window_px, mode="constant", cval=0.0)
+    pw = cfg.point_peak_window_px if cfg.point_peak_window_px is not None else cfg.peak_window_px
+    mx = ndimage.maximum_filter(hm, size=pw, mode="constant", cval=0.0)
     rows, cols = np.nonzero((hm >= mx) & (hm >= cfg.hm_thr))
     t = np.linspace(0.0, 2.0 * np.pi, cfg.point_vertices, endpoint=False)
     circle = np.column_stack([np.cos(t), np.sin(t)]) * cfg.point_radius_px * grid.pixel_size
@@ -469,14 +483,25 @@ def postprocess(
         # Закрытие 2 px убирает нити, крупные блоки остаются исключёнными.
         m = ndimage.binary_closing(valid, structure=np.ones((3, 3), dtype=bool), iterations=2)
         probs = probs * m.astype(probs.dtype)[None]
-    dets: list[Detection] = []
+    # NMS раздельный: у сег-полигонов и у точек разные радиусы. Общий проход
+    # гасил круги находок рядом с центроидом кургана и соседей в плотных
+    # кластерах точек (радиус 4-6 м при шаге разметки 2-4 м).
+    poly_dets: list[Detection] = []
+    hm_dets: list[Detection] = []
     for i, cls in enumerate(classes):
         branch = _branch_for(cls, cfg)
         if branch in (BRANCH_POLYGON, BRANCH_BOTH):
             # hm обязателен для деления слитых компонент: без него
             # соприкасающиеся полигоны дают один блоб = 1 TP и N-1 FN
             # (n3_long: oracle recall 0.244 именно поэтому).
-            dets += seg_to_polygons(probs[i], grid, cls, cfg, hm=probs[k + i])
+            poly_dets += seg_to_polygons(probs[i], grid, cls, cfg, hm=probs[k + i])
         if branch in (BRANCH_POINT, BRANCH_BOTH):
-            dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
-    return nms_centroids(dets, cfg.nms_radius_px * grid.pixel_size)[: cfg.max_detections]
+            hm_dets += heatmap_to_points(probs[k + i], grid, cls, cfg)
+    point_r = cfg.point_nms_radius_px if cfg.point_nms_radius_px is not None else cfg.nms_radius_px
+    kept = nms_centroids(poly_dets, cfg.nms_radius_px * grid.pixel_size)
+    kept += nms_centroids(hm_dets, point_r * grid.pixel_size)
+    # Склейка веток BOTH: круг hm и сег-полигон одного объекта не должны
+    # выживать оба. Для классов, живущих в одной ветке, проход no-op:
+    # свои радиусы там уже отработали, min(nms, point) <= каждого.
+    kept = nms_centroids(kept, min(cfg.nms_radius_px, point_r) * grid.pixel_size)
+    return sorted(kept, key=lambda d: -d.score)[: cfg.max_detections]
