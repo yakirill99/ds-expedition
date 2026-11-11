@@ -224,9 +224,7 @@ def _hm_peaks(
     return ys, xs
 
 
-def _voronoi_by_peaks(
-    comp: np.ndarray, ys: np.ndarray, xs: np.ndarray
-) -> np.ndarray:
+def _voronoi_by_peaks(comp: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> np.ndarray:
     """Каждый пиксель компонента — к ближайшему пику (1..N). Нулевой пиксель — 0.
 
     При равных расстояниях побеждает минимальный исходный индекс пика

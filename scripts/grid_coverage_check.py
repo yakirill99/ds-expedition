@@ -161,8 +161,10 @@ def main(argv: list[str] | None = None) -> int:
             )
     total_out = sum(r.get("outside", 0) for r in rows) + sum(r.get("outside", 0) for r in bad)
     total_gt = sum(r.get("labels", 0) for r in rows) + sum(r.get("labels", 0) for r in bad)
-    print(f"\nИТОГО: GT {total_gt}, вне сетки {total_out} "
-          f"({100 * total_out / max(total_gt, 1):.1f}%) на {len(rows) + len(bad)} участках")
+    print(
+        f"\nИТОГО: GT {total_gt}, вне сетки {total_out} "
+        f"({100 * total_out / max(total_gt, 1):.1f}%) на {len(rows) + len(bad)} участках"
+    )
     return 0
 
 

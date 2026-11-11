@@ -1,5 +1,5 @@
 data:
-  sites_dir: data/rebuilt
+  sites_dir: data/raw
   labels_file: labels.geojson
   channels:
   - dtm

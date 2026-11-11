@@ -224,9 +224,9 @@ def test_offgrid_keep_mask_polygon_no_rtol_margin():
 
     grid = _grid()
     x1 = X0 + W * PS
-    near_out = _obj(_rect(x1 + 3.0, Y0 + 5.0, x1 + 13.0, Y0 + 15.0))  # 3 м за краем — в пределах старого запаса 15
+    near_out = _obj(
+        _rect(x1 + 3.0, Y0 + 5.0, x1 + 13.0, Y0 + 15.0)
+    )  # 3 м за краем — в пределах старого запаса 15
     straddle = _obj(_rect(x1 - 5.0, Y0 + 5.0, x1 + 5.0, Y0 + 15.0))  # частично в сетке
-    keep = _offgrid_keep_mask(
-        [near_out, straddle], grid, grid.crs, r_tol=15.0, r_tol_units="crs"
-    )
+    keep = _offgrid_keep_mask([near_out, straddle], grid, grid.crs, r_tol=15.0, r_tol_units="crs")
     assert keep.tolist() == [False, True]

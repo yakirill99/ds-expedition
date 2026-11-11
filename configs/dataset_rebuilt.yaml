@@ -9,7 +9,7 @@
 # Скачать: make data
 # ============================================================
 data:
-  sites_dir: data/rebuilt
+  sites_dir: data/raw
   labels_file: labels.geojson
   # Порядок = контракт модели (сохраняется в чекпоинт).
   # 27 слоёв из LAS (build_layers.py) + 4 растровых (rgb_r/g/b, mag)

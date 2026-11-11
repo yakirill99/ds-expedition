@@ -122,9 +122,7 @@ def test_oracle_measures_ceiling_not_production_branches(tmp_path):
     from expds.post.vectorize import oracle_postcfg
 
     cfg = _cfg(tmp_path, epochs=1, min_epoch=99)
-    cfg = dreplace(
-        cfg, post=dreplace(cfg.post, branches={"mound": "polygon", "ditch": "polygon"})
-    )
+    cfg = dreplace(cfg, post=dreplace(cfg.post, branches={"mound": "polygon", "ditch": "polygon"}))
     val = _site("v", 3)
     gt_probs = np.concatenate([val.y_seg, val.y_hm])
     gts = objects_from_detections(detect(gt_probs, val, CLASSES, oracle_postcfg(cfg.post)))

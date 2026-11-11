@@ -445,7 +445,9 @@ def fit(
                 )
             if oracle_f1 < 0.95:
                 gate_note = (
-                    f"гейт включён, порог {tc.oracle_gate:.2f}" if tc.oracle_gate > 0 else "гейт отключён, train.oracle_gate"
+                    f"гейт включён, порог {tc.oracle_gate:.2f}"
+                    if tc.oracle_gate > 0
+                    else "гейт отключён, train.oracle_gate"
                 )
                 print(
                     f"ПРЕДУПРЕЖДЕНИЕ: oracle f1 {oracle_f1:.3f} < 0.95 — потолок метрики "

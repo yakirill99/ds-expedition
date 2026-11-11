@@ -255,6 +255,49 @@ def _read_all_points(
     intensity = all_points[:, 3].astype(np.float32)
     return_number = all_points[:, 4].astype(np.uint8)
 
+    # Отсев мусорных координат. В части LAS есть точки с нулями и
+    # переполнением int32 (190_Муравлево: x=0, y=-21474836.4), при этом
+    # заголовок файла показывает корректные границы и ничего не выдаёт.
+    # Без отсева целевая сетка растягивается до 4.26 PiB.
+    envelope = (
+        np.isfinite(x)
+        & np.isfinite(y)
+        & np.isfinite(z)
+        & (np.abs(x) < 1e7)
+        & (np.abs(y) < 1e7)
+        & (np.abs(z) < 1e5)
+    )
+    n_in = len(x)
+    if not envelope.all():
+        x, y, z, intensity, return_number = (
+            a[envelope] for a in (x, y, z, intensity, return_number)
+        )
+    if len(x):
+        # Второй рубеж: медиана устойчива к доле выбросов, реальный
+        # участок заведомо укладывается в 20 км от неё.
+        cx, cy = float(np.median(x)), float(np.median(y))
+        near = (np.abs(x - cx) < 20_000) & (np.abs(y - cy) < 20_000)
+        if not near.all():
+            x, y, z, intensity, return_number = (
+                a[near] for a in (x, y, z, intensity, return_number)
+            )
+    if n_in != len(x):
+        logger.warning(
+            "Отсеяно мусорных точек: %d из %d (%.2f%%)",
+            n_in - len(x),
+            n_in,
+            100.0 * (n_in - len(x)) / n_in,
+        )
+    if not len(x):
+        raise RawSiteUnsupportedError(
+            f"после отсева мусорных координат не осталось точек: {[str(p) for p in las_files]}"
+        )
+    span_x, span_y = float(x.max() - x.min()), float(y.max() - y.min())
+    if max(span_x, span_y) > 50_000:
+        raise RawSiteUnsupportedError(
+            f"охват {span_x:.0f}x{span_y:.0f} м не похож на участок — битые координаты"
+        )
+
     logger.info(
         "Прочитано точек: %d | X=(%.1f, %.1f) | Y=(%.1f, %.1f) | Z=(%.2f, %.2f)",
         len(x),
@@ -645,7 +688,15 @@ def resolve_sites(
             if cfg is None:
                 need_cfg.append(entry)
                 continue
-            raise
+            logger.warning("%s: сборка невозможна, пропуск", entry.name)
+            skipped.append(entry)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # Битый LAS, нехватка памяти, что угодно: один участок не должен
+            # валить весь запуск — на платформе это стоит попытки в сутки.
+            logger.warning("%s: сборка упа (%s: %s), пропуск", entry.name, type(exc).__name__, exc)
+            skipped.append(entry)
+            continue
         (ready if got else skipped).append(entry)
 
     if skipped:

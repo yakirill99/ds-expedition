@@ -312,8 +312,10 @@ def _feat_poly(grid, ring_m):
 
     ring = np.asarray(ring_m, dtype=np.float64)
     px = np.column_stack(
-        [(ring[:, 0] - grid.x_min) / grid.pixel_size - 0.5,
-         (ring[:, 1] - grid.y_min) / grid.pixel_size - 0.5]
+        [
+            (ring[:, 0] - grid.x_min) / grid.pixel_size - 0.5,
+            (ring[:, 1] - grid.y_min) / grid.pixel_size - 0.5,
+        ]
     )
     return LabelFeature(cls="k", geom_type="Polygon", world=(ring,), pixel=(px,), properties={})
 
@@ -387,8 +389,9 @@ def test_split_touching_different_radii():
     feats = [_feat_poly(grid, ring1), _feat_poly(grid, ring2)]
     y_seg, y_hm = _targets(grid, feats)
 
-    cfg = PostConfig(split_touching=True, split_min_distance_px=4,
-                     min_area_px=1.0, hm_thr=0.15, peak_window_px=7)
+    cfg = PostConfig(
+        split_touching=True, split_min_distance_px=4, min_area_px=1.0, hm_thr=0.15, peak_window_px=7
+    )
     dets = seg_to_polygons(y_seg[0], grid, "k", cfg, hm=y_hm[0])
     assert len(dets) == 2
     for feat in feats:
@@ -421,8 +424,9 @@ def test_tiny_component_does_not_disable_split():
     )
     y_seg, y_hm = _targets(grid, pair + [tiny])
 
-    cfg = PostConfig(split_touching=True, split_min_distance_px=4,
-                     min_area_px=1.0, hm_thr=0.15, peak_window_px=7)
+    cfg = PostConfig(
+        split_touching=True, split_min_distance_px=4, min_area_px=1.0, hm_thr=0.15, peak_window_px=7
+    )
     dets = seg_to_polygons(y_seg[0], grid, "k", cfg, hm=y_hm[0])
     # пара делится на 2 + мелкий = 3 детекции
     assert len(dets) == 3
