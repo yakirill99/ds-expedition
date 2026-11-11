@@ -109,6 +109,26 @@ def _write_empty(out: Path, crs: str = "EPSG:3857") -> None:
     out.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
 
 
+# Подобрано на val по официальной метрике: FP курганов/городищ штрафуются,
+# хвост низкой уверенности почти не даёт TP (FP ratio на платформе 48).
+_MIN_CONF = 0.80
+_MIN_CONF_CLASS = {"object_poly": 0.0, "finds_points": 0.0}
+
+
+def _filter_conf(out: Path) -> None:
+    fc = json.loads(out.read_text(encoding="utf-8"))
+    feats = fc.get("features", [])
+    kept = [
+        f
+        for f in feats
+        if float(f["properties"].get("confidence") or 0.0)
+        >= _MIN_CONF_CLASS.get(f["properties"].get("class_name"), _MIN_CONF)
+    ]
+    fc["features"] = kept
+    out.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
+    print(f"фильтр уверенности: {len(feats)} -> {len(kept)}", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -141,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         data = _writable_copy(input_dir, work / "input")
         print(f"рабочая копия: {data}", flush=True)
-        return predict_main(
+        rc = predict_main(
             [
                 "--data",
                 str(data),
@@ -155,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
                 "auto",
             ]
         )
+        try:
+            _filter_conf(out_path)
+        except Exception:
+            traceback.print_exc()
+        return rc
     except Exception:
         # Непойманное исключение = код != 0 и нет файла: платформа тратит
         # попытку впустую. Пустой FeatureCollection даёт 0 баллов по региону,
