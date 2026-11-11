@@ -444,7 +444,8 @@ def heatmap_to_points(hm: np.ndarray, grid: Grid, cls: str, cfg: PostConfig) -> 
 BRANCH_POLYGON = "polygon"
 BRANCH_POINT = "point"
 BRANCH_BOTH = "both"
-BRANCHES = (BRANCH_POLYGON, BRANCH_POINT, BRANCH_BOTH)
+BRANCH_NONE = "none"
+BRANCHES = (BRANCH_POLYGON, BRANCH_POINT, BRANCH_BOTH, BRANCH_NONE)
 
 
 def _branch_for(cls: str, cfg: "PostConfig") -> str:
