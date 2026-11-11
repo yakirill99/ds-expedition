@@ -107,3 +107,27 @@ def test_fit_smoke(tmp_path):
     m, meta = load_checkpoint(run / "best.pt", channel_names=CH, classes=CLASSES)
     assert 1 <= meta["extra"]["epoch"] <= 5
     assert (run / "last.pt").exists()
+
+
+def test_oracle_measures_ceiling_not_production_branches(tmp_path):
+    """Гейт меряет «щедрый потолок» (обе ветки), а не прод-ограничение branches.
+
+    night3 2026-11-11: прод-конфиг (курганы polygon-only) давал oracle f1
+    0.872 при потолке 0.910 — гейт и oracle_diag расходились в числах на
+    одной разметке. GT здесь построены цепочкой потолка (обе ветки):
+    старый код с прод-ветками в оракуле терял hm-круги и дал бы f1 < 1.
+    """
+    from dataclasses import replace as dreplace
+
+    from expds.post.vectorize import oracle_postcfg
+
+    cfg = _cfg(tmp_path, epochs=1, min_epoch=99)
+    cfg = dreplace(
+        cfg, post=dreplace(cfg.post, branches={"mound": "polygon", "ditch": "polygon"})
+    )
+    val = _site("v", 3)
+    gt_probs = np.concatenate([val.y_seg, val.y_hm])
+    gts = objects_from_detections(detect(gt_probs, val, CLASSES, oracle_postcfg(cfg.post)))
+    run = tmp_path / "run"
+    res = fit(cfg, [_site("t1", 1)], [(val, gts)], run, eval_crs=val.grid.crs)
+    assert res["oracle"]["f1"] == 1.0

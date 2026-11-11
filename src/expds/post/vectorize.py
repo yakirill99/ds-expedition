@@ -20,7 +20,7 @@ Marching squares оставлен в skimage (BSD-3): совместимо по 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
@@ -461,6 +461,23 @@ def _branch_for(cls: str, cfg: "PostConfig") -> str:
     if b not in BRANCHES:
         raise ValueError(f"post.branches[{cls!r}]={b!r}, ожидалось одно из {BRANCHES}")
     return b
+
+
+def oracle_postcfg(cfg: PostConfig) -> PostConfig:
+    """Конфиг «щедрого потолка» оракула: обе ветки у всех классов.
+
+    Гейт обучения и oracle_diag обязаны мерить ОДНО И ТО ЖЕ — возможности
+    post+матчинга без прод-ограничений branches (см. докстринг oracle.py).
+    Прод-конфиг может резать ветки — это его право, но тогда гейт и
+    диагностика разъезжаются в числах и отладка «одних и тех же ошибок»
+    не сходится никогда (night3 2026-11-11: гейт f1 0.872 против diag
+    0.910 — circles hm-ветки спасали ~200 GT только в diag).
+
+    Внимание: под coverage-матчингом платформы круги hm-ветки матчатся
+    с GT-полигонами (cov = inter/min-площадь >= 0.5), поэтому «точка по
+    полигональному классу — чистый FP» верно только для строгого IoU.
+    """
+    return replace(cfg, branches=None)
 
 
 def postprocess(

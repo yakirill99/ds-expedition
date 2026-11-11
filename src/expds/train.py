@@ -43,6 +43,7 @@ from expds.models.base import BaseSegmenter
 from expds.models.checkpoint import save_checkpoint
 from expds.models.factory import build_model
 from expds.models.koz_loss import KozLoss
+from expds.post.vectorize import PostConfig, oracle_postcfg
 from expds.tiles.augment import AugmentConfig, AugmentedDataset, warmup_hm_weight
 from expds.tiles.dataset import KozDataset, SiteData, load_site
 from expds.utils.seed import seed_everything
@@ -141,12 +142,25 @@ def _offgrid_keep_mask(
 
     След сетки в eval_crs — bbox плотной выборки его границы (выпуклая
     оболочка следа: ничего внутреннего не теряем при любом переходе CRS).
-    Точкам GT даём запас r_tol (как в матчере).
+    Запас r_tol — ТОЛЬКО точкам (как в матчере): полигон, чей bbox лежит
+    за пределами растра, пикселей не содержит и недетектируем, как и GT
+    целиком вне сетки. Раньше запас получали все объекты, и полигон в
+    нескольких метрах за краем оставался в метрике FN (night3
+    2026-11-11: 008_Герите +26, 164_Кисловодская_котловина_1 +2 против
+    oracle_diag, у которого отсечение — по растеризации).
+
+    Бокс — по центрам пикселей (ровно то, что может растеризоваться),
+    а не по номинальной протяжённости сетки: полигон во внешнем
+    полупикселе центров не содержит.
     """
     ps = grid.pixel_size
     n = 16
-    xs = np.linspace(grid.x_min, grid.x_min + grid.width * ps, n)
-    ys = np.linspace(grid.y_min, grid.y_min + grid.height * ps, n)
+    x_lo = grid.x_min + 0.5 * ps
+    y_lo = grid.y_min + 0.5 * ps
+    x_hi = grid.x_min + (grid.width - 0.5) * ps
+    y_hi = grid.y_min + (grid.height - 0.5) * ps
+    xs = np.linspace(x_lo, x_hi, n)
+    ys = np.linspace(y_lo, y_hi, n)
     border = np.array(
         [(x, ys[0]) for x in xs]
         + [(x, ys[-1]) for x in xs]
@@ -163,11 +177,15 @@ def _offgrid_keep_mask(
     if not len(gts):
         return np.zeros(0, dtype=bool)
     is_point = np.array([g.geom_type == "Point" for g in gts])
-    margin = np.full(len(gts), float(r_tol))
-    if r_tol_units == "meters" and is_point.any():
-        # Тот же пересчёт «метры на местности -> EPSG:3857», что в матчере.
-        y_pt = np.array([g.centroid[1] for g, p in zip(gts, is_point, strict=True) if p])
-        margin[is_point] = float(r_tol) * np.cosh(y_pt / WEB_MERCATOR_R)
+    # r_tol-запас — только точкам: у полигонального GT вне пиксельной
+    # сетки нет ни одного пикселя независимо от расстояния до края.
+    margin = np.zeros(len(gts), dtype=np.float64)
+    if is_point.any():
+        margin[is_point] = float(r_tol)
+        if r_tol_units == "meters":
+            # Тот же пересчёт «метры на местности -> EPSG:3857», что в матчере.
+            y_pt = np.array([g.centroid[1] for g, p in zip(gts, is_point, strict=True) if p])
+            margin[is_point] = float(r_tol) * np.cosh(y_pt / WEB_MERCATOR_R)
     gbox = np.array([g.bbox for g in gts])
     keep = (
         (gbox[:, 0] <= hi[0] + margin)
@@ -187,13 +205,16 @@ def _score(
     tmp_dir: Path,
     total: MatchResult,
     per_cls: dict[str, MatchResult] | None = None,
+    post_cfg: PostConfig | None = None,
 ) -> None:
     """Вероятности участка -> детекции -> метрика; счётчики добавляются в total.
 
     per_cls: если передан, туда же складываются счётчики по классам
     (динамика по типам объектов в логе, а не только сводная f1).
+    post_cfg: переопределение post-конфига — оракул считает с
+    oracle_postcfg (обе ветки), валидация модели — с прод-конфигом.
     """
-    dets = detect(probs, site, cfg.targets.classes, cfg.post)
+    dets = detect(probs, site, cfg.targets.classes, post_cfg or cfg.post)
     preds = _to_eval_objects(dets, site.grid.crs, eval_crs, tmp_dir)
     gts_used: Sequence[EvalObject] = list(gts)
     if cfg.eval.ignore_offgrid and gts_used:
@@ -223,12 +244,34 @@ def _oracle(
     tmp_dir: Path,
     per_cls: dict[str, MatchResult] | None = None,
 ) -> MatchResult:
-    """Таргеты (y_seg, y_hm) как идеальные вероятности через post + метрику."""
+    """Таргеты (y_seg, y_hm) как идеальные вероятности через post + метрику.
+
+    Детекции строятся с oracle_postcfg (обе ветки у всех классов) — тот же
+    «щедрый потолок», что в scripts/oracle_diag.py / eval.oracle. Прод-ветки
+    (post.branches) сюда попадать не должны: гейт проверяет цепочку
+    растеризация->post->матчинг, а не выбор конфига. Иначе гейт и diag
+    дают разные числа на одной разметке (night3 2026-11-11: 0.872 против
+    0.910 — hm-круги спасали ~200 GT только в diag), и «те же ошибки»
+    не сходятся никогда.
+    """
     total = MatchResult()
+    post_oracle = oracle_postcfg(cfg.post)
     for site, gts in val_sets:
-        if site.has_labels:
-            probs = np.concatenate([site.y_seg, site.y_hm]).astype(np.float32)
-            _score(probs, site, gts, cfg, eval_crs, tmp_dir, total, per_cls)
+        if not site.has_labels:
+            continue
+        site_res = MatchResult()
+        probs = np.concatenate([site.y_seg, site.y_hm]).astype(np.float32)
+        _score(probs, site, gts, cfg, eval_crs, tmp_dir, site_res, per_cls, post_cfg=post_oracle)
+        total.tp += site_res.tp
+        total.fp += site_res.fp
+        total.fn += site_res.fn
+        # Построчная прозрачность: строки гейта сравниваются с oracle_diag
+        # постранично 1:1, без пересчёта вручную.
+        print(
+            f"  oracle {site.name}: f1 {site_res.f1:.3f} p {site_res.precision:.3f} "
+            f"r {site_res.recall:.3f} (tp {site_res.tp} fp {site_res.fp} fn {site_res.fn})",
+            flush=True,
+        )
     return total
 
 
@@ -395,13 +438,18 @@ def fit(
                     f"oracle gate: f1 {oracle_f1:.3f} < порога {tc.oracle_gate:.2f} — "
                     f"пайплайн теряет эталон до модели (tp {oracle['tp']} fp {oracle['fp']} "
                     f"fn {oracle['fn']}). Обучение даст ложную метрику. Сначала прогоните "
-                    f"scripts/oracle_diag.py --config <конфиг> и почините post/данные "
+                    f"scripts/oracle_diag.py --config <конфиг> и сравните его построчные "
+                    f"f1 с oracle-строками выше: совпали — почините post "
+                    f"(oracle_diag --sweep), разошлись — разные данные/ветки. "
                     f"(при GT вне сетки участка включите eval.ignore_offgrid)."
                 )
-            if tc.oracle_gate <= 0 and oracle_f1 < 0.95:
+            if oracle_f1 < 0.95:
+                gate_note = (
+                    f"гейт включён, порог {tc.oracle_gate:.2f}" if tc.oracle_gate > 0 else "гейт отключён, train.oracle_gate"
+                )
                 print(
                     f"ПРЕДУПРЕЖДЕНИЕ: oracle f1 {oracle_f1:.3f} < 0.95 — потолок метрики "
-                    f"занижен пайплайном (гейт отключён, train.oracle_gate).",
+                    f"занижен пайплайном ({gate_note}).",
                     flush=True,
                 )
         best_epoch = 0

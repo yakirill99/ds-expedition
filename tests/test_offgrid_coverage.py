@@ -209,3 +209,24 @@ def test_offgrid_keep_mask():
     gts = [inside, partial, outside, point_in, point_out]
     keep = _offgrid_keep_mask(gts, grid, grid.crs, r_tol=5.0, r_tol_units="crs")
     assert keep.tolist() == [True, True, False, True, False]
+
+
+def test_offgrid_keep_mask_polygon_no_rtol_margin():
+    """Полигон за краем растра не удерживается в метрике r_tol-запасом.
+
+    night3 2026-11-11: r_tol-запас 15 получали ВСЕ GT вместо одних точек
+    (как заявлено в докстринге), и полигоны в нескольких метрах за краем
+    растра оставались FN: 008_Герите +26, 164_Кисловодская_котловина_1 +2
+    против oracle_diag (у него отсечение по растеризации). Бокс теперь по
+    центрам пикселей, запас — только точкам.
+    """
+    from expds.train import _offgrid_keep_mask
+
+    grid = _grid()
+    x1 = X0 + W * PS
+    near_out = _obj(_rect(x1 + 3.0, Y0 + 5.0, x1 + 13.0, Y0 + 15.0))  # 3 м за краем — в пределах старого запаса 15
+    straddle = _obj(_rect(x1 - 5.0, Y0 + 5.0, x1 + 5.0, Y0 + 15.0))  # частично в сетке
+    keep = _offgrid_keep_mask(
+        [near_out, straddle], grid, grid.crs, r_tol=15.0, r_tol_units="crs"
+    )
+    assert keep.tolist() == [False, True]

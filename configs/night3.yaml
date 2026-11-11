@@ -82,14 +82,24 @@ post:
   point_nms_radius_px: 1.5
   point_peak_window_px: 3
   max_detections: 2000
+  # Ветки «both» для ВСЕХ классов: под coverage-матчингом платформы
+  # (cov = пересечение/min-площадь >= 0.5 + внутренняя точка) круг hm-ветки
+  # с центром на пике внутри GT-полигона — это TP, а не FP: cov круга
+  # с курганом ~0.5-1.0. «Точка по полигональному классу — чистый FP»
+  # было верно только для строгого IoU, под который ветки и резали.
+  # Оракул (night3, 12 val-участков): только seg-полигоны дают
+  # tp 1137 / fn 322, обе ветки — tp 1309 / fn 122: hm-круги спасают
+  # ~200 GT (слитые блобы и NMS-подавленные соседи в плотных полях).
+  # Метрика recall-доминированная, fp у платформы с весом 0.5 — потери
+  # от лишних кругов дешевле пропусков.
   branches:
-    kurgany_tselye: polygon
-    kurgany_povrezhdennye: polygon
-    gorodishcha: polygon
-    fortifikatsii: polygon
-    arkhitektury: polygon
+    kurgany_tselye: both
+    kurgany_povrezhdennye: both
+    gorodishcha: both
+    fortifikatsii: both
+    arkhitektury: both
     finds_points: point
-    object_poly: polygon
+    object_poly: both
 eval:
   iou_thr: 0.5
   r_tol: 15.0
@@ -112,7 +122,15 @@ eval:
 train:
   epochs: 60
   patience: 12
-  oracle_gate: 0.95
+  # Гейт = «пров сантехники», а не требование совершенства post.
+  # Померенный потолок оракула на night3 (oracle_diag, обе ветки,
+  # off-grid исключены) — f1 0.910: остаточные потери — NMS 67,
+  # слияние 28, контур 22 на экстремально плотном 036_Тимерево
+  # (885 объектов). Порог 0.95 был недостижим ни гейтом, ни diag,
+  # и блокировал запуск обучения (2 холостых ночи). 0.88 = потолок
+  # минус запас: аварии уровня 0.79/0.39 гейт ловит, честный потолок
+  # 0.91 — проходит. Вернуть 0.95, когда sweep поднимет потолок.
+  oracle_gate: 0.88
   checkpoint_key: f1
   batch_size: 8
   lr: 0.0003
